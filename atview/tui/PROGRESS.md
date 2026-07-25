@@ -253,6 +253,15 @@ that Workman has mutable references.
   thread expansions, then independently merged the page and graph completions to finish at 23/59
   with the selected thread ready. Pagination did not displace later navigation, graph Tasks did not
   wait for the page, and the terminal restored normally on quit.
+- 2026-07-25: Replaced the nested terminal-sequence conditional stack with SML-shaped list-prefix
+  matching. Workman has no separate `Char`, so an input chunk is exploded into
+  `List<String>` containing one-character strings. Patterns such as
+  `[escape, "[", "A", ..rest]` consume a key and recursively decode the unmatched tail. The
+  variable-width cell-size response uses the same representation with a recursive
+  positive-number parser rather than dropping back to string searches and splits.
+- 2026-07-25: Added `event-pattern-probe.wm`. One coalesced input covers CSI and SS3 arrows,
+  Shift-Tab, Page Up/Down, both Home/End encodings, `CSI 6;20;10t`, an ordinary character, and
+  Ctrl-C. It evaluates to the expected twelve-event list and prints `event prefix patterns ok`.
 
 ## Issues and observations
 
@@ -441,3 +450,86 @@ need for an equality type variable. Workman intentionally does not expose equali
 variables, so the helper cannot generalize until its key is concretized. Annotating the graph key as
 `String` resolves the deferred equality obligation. This is consistent with the earlier compiler
 fix, but graph algorithms make the missing SML equality-variable surface more noticeable.
+
+### FIXED-TUI-023 — Ownership-based project layout
+
+The client previously mixed protocol modules at the project root with application code inside
+`tui/`, which made the reusable library boundary unclear and left `app.wm` near two thousand lines.
+The project now has four explicit ownership roots:
+
+- `proto/` for AT/XRPC/authentication and Lexicon projections;
+- `tui/` for reusable terminal primitives, retained surfaces, and runtime infrastructure;
+- `app/` for the atview model, transitions, graph scheduler, views, renderer, and entrypoints;
+- `util/` for general helpers that may later become libraries or standard-library functions.
+
+The interactive entrypoint is now 60 lines. Its former body is split by responsibility into
+`model`, `data`, `graph`, `update`, feed/thread views, screen composition, and reactive rendering.
+The pure command and concurrent scheduling algebra moved from the host runtime into
+`tui/command.wm`, reducing `runtime.wm` from 627 to 435 lines without introducing references.
+
+### OPEN-TUI-024 — Transitive imported nominal rejected as block-local
+
+Moving image loading and retained rendering across application-module boundaries exposed a distinct
+module inference defect. An imported function may carry a nominal type in its inferred signature,
+but `inferBlock` accepts only nominal IDs explicitly present in the consumer's type environment.
+It therefore reports `local type escapes scope` for dependency-owned types such as `AppError`,
+`RenderModel`, and `RenderDependency`.
+
+Explicitly importing those otherwise-unused types is a working but fragile workaround.
+`app/image-boundary-probe.wm` retains a small checked reproduction. The compiler issue and likely
+cause are recorded in:
+
+```text
+wm-mini/markdown/issues/transitive-imported-nominal-fails-block-escape-check.md
+```
+
+The earlier staged FFI/nominal-wave defect is separately documented as fixed in:
+
+```text
+wm-mini/markdown/issues/FIXED-staged-ffi-reinference-mixes-nominal-waves.md
+```
+
+### OPEN-TUI-025 — Named import collides with generated module binding
+
+The reorganized entrypoint initially used:
+
+```wm
+from "./render.wm" import { render };
+```
+
+`wm check` passed, but `wm run` generated `const render = render.render` and Node rejected the
+duplicate declaration before the application started. A distinct namespace import
+(`* as Render`) is a working source-level workaround. The compiler issue is recorded in:
+
+```text
+wm-mini/markdown/issues/named-import-collides-with-generated-module-binding.md
+```
+
+### FIXED-TUI-026 — Feed and thread rendering used imperative string assembly
+
+Feed cards and reply trees previously interleaved geometry, conditionals, recursive traversal, and
+ANSI/Kitty string concatenation inside large blocks. This made the visible component hierarchy hard
+to see and made reusable UI extraction mostly a matter of copying string-producing helpers.
+
+`tui/element.wm` now defines a small recursive `Element` datatype:
+
+```wm
+type Element =
+  | Empty
+  | Fragment<List<Element>>
+  | Text<Geometry.Rect, String, Draw.Style>
+  | Lines<Geometry.Rect, List<String>, Draw.Style>
+  | Fill<Geometry.Rect, String, Draw.Style>
+  | Box<Geometry.Rect, String, Bool>
+  | TimelineBox<Geometry.Rect, Bool, Bool, Bool>
+  | Image<Number, Geometry.Rect, Kitty.Scale, Kitty.Image>;
+```
+
+Components are ordinary Workman functions returning `Element`. `fragment`, `showIf`, and `optional`
+provide JSX-like composition without custom syntax, macros, ambient builders, or mutable child
+buffers. A single total interpreter lowers the tree to the existing `Draw` and Kitty boundaries.
+
+Feed cards, selected-post content, thread status, reply placeholders, and recursive reply posts now
+compose elements. Reply traversal returns an immutable element plus its next row/image cursor;
+reply geometry and reply presentation are separate functions. `element-probe.wm` deterministically
+checks nested fragment ordering and conditional/optional omission.

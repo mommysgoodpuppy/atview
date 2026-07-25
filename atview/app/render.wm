@@ -1,0 +1,287 @@
+-- Reactive render dependencies and incremental terminal surface updates.
+
+from "./model.wm" import *;
+from "./feed-view.wm" import { visibleStart };
+from "./view.wm" import *;
+from "../tui/ansi.wm" import * as Ansi;
+from "../tui/draw.wm" import * as Draw;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/kitty.wm" import * as Kitty;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/surface.wm" import * as Surface;
+
+let threadKey = match(thread) => {
+  ThreadLoading(uri) => { "loading:" ++ uri },
+  ThreadReady(uri, _) => { "ready:" ++ uri },
+  ThreadFailed(uri, message) => { "failed:" ++ uri ++ ":" ++ message },
+};
+
+let feedRegion = (model: RenderModel) => {
+  FeedRegion(
+    model.state.renderVersion,
+    model.start,
+    model.size,
+  )
+};
+
+let selectionRegion = (model: RenderModel) => {
+  SelectionRegion(model.state.selected, model.start)
+};
+
+let threadRegion = (model: RenderModel) => {
+  ThreadRegion(
+    model.state.selected,
+    model.state.renderVersion,
+    model.state.imageScale,
+    threadKey(model.state.thread),
+    model.size,
+  )
+};
+
+let footerRegion = (model: RenderModel) => {
+  let graph = graphCounts(model.state.threadGraph);
+  FooterRegion(
+    model.state.selected,
+    List.length(postsFor(model.state.feeds, model.state.view)),
+    model.state.view,
+    model.state.loading,
+    model.state.status,
+    graph.ready,
+    graph.pending,
+    model.size,
+  )
+};
+
+let sameSize = (left: Geometry.Size, right: Geometry.Size) => {
+  left.width <= right.width && left.width >= right.width &&
+    left.height <= right.height && left.height >= right.height &&
+    left.cellWidth <= right.cellWidth && left.cellWidth >= right.cellWidth &&
+    left.cellHeight <= right.cellHeight && left.cellHeight >= right.cellHeight
+};
+
+let sameView = match(left, right) => {
+  (Timeline, Timeline) => { true },
+  (OwnPosts, OwnPosts) => { true },
+  _ => { false },
+};
+
+let sameScale = match(left, right) => {
+  (Kitty.Fit, Kitty.Fit) => { true },
+  (Kitty.Fill, Kitty.Fill) => { true },
+  _ => { false },
+};
+
+let sameNumber = (left: Number, right: Number) => {
+  left <= right && left >= right
+};
+
+let sameText = (left: String, right: String) => {
+  left == right
+};
+
+let sameBool = match(left, right) => {
+  (true, true) => { true },
+  (false, false) => { true },
+  _ => { false },
+};
+
+let sameFeedRegion = (left: FeedRegion, right: FeedRegion) => {
+  sameNumber(left.renderVersion, right.renderVersion) &&
+    sameNumber(left.start, right.start) &&
+    sameSize(left.size, right.size)
+};
+
+let sameSelectionRegion = (left: SelectionRegion, right: SelectionRegion) => {
+  sameNumber(left.selected, right.selected) &&
+    sameNumber(left.start, right.start)
+};
+
+let sameThreadRegion = (left: ThreadRegion, right: ThreadRegion) => {
+  sameNumber(left.selected, right.selected) &&
+    sameNumber(left.renderVersion, right.renderVersion) &&
+    sameScale(left.imageScale, right.imageScale) &&
+    sameText(left.threadKey, right.threadKey) &&
+    sameSize(left.size, right.size)
+};
+
+let sameFooterRegion = (left: FooterRegion, right: FooterRegion) => {
+  sameNumber(left.selected, right.selected) &&
+    sameNumber(left.count, right.count) &&
+    sameView(left.view, right.view) &&
+    sameBool(left.loading, right.loading) &&
+    sameText(left.status, right.status) &&
+    sameNumber(left.graphReady, right.graphReady) &&
+    sameNumber(left.graphPending, right.graphPending) &&
+    sameSize(left.size, right.size)
+};
+
+let sameRenderDependency = match(left, right) => {
+  (SelectionSurface, SelectionSurface) => { true },
+  (ThreadSurface, ThreadSurface) => { true },
+  (FooterSurface, FooterSurface) => { true },
+  _ => { false },
+};
+
+let selectionSignal = Reactive.signal(
+  SelectionSurface,
+  (model: RenderModel) => { model },
+);
+
+let threadSignal = Reactive.signal(
+  ThreadSurface,
+  (model: RenderModel) => { model },
+);
+
+let footerSignal = Reactive.signal(
+  FooterSurface,
+  (model: RenderModel) => { model },
+);
+
+let selectionEffect = Reactive.effect(
+  "selection",
+  Reactive.read(selectionSignal) :> Reactive.map((model) => {
+    let state = model.state;
+    let selected = state.selected;
+    Reactive.emit(
+      [
+        Surface.Raw(
+          renderSelectionOutline(
+            state,
+            model.size,
+            model.start,
+            selected,
+            true,
+            true,
+          ),
+        )
+      ],
+      [
+        Surface.Raw(
+          renderSelectionOutline(
+            state,
+            model.size,
+            model.start,
+            selected,
+            false,
+            false,
+          ),
+        )
+      ],
+    )
+  }),
+);
+
+let threadEffect = Reactive.effect(
+  "thread",
+  Reactive.read(threadSignal) :> Reactive.map((model) => {
+    Reactive.commands(
+      [Surface.Raw(renderThreadRegion(model.state, model.size))],
+    )
+  }),
+);
+
+let footerEffect = Reactive.effect(
+  "footer",
+  Reactive.read(footerSignal) :> Reactive.map((model) => {
+    Reactive.commands(
+      [Surface.Raw(renderFooter(model.state, model.size))],
+    )
+  }),
+);
+
+let renderEffects = [selectionEffect, threadEffect, footerEffect];
+
+let changedDependencies = (previous: RenderModel, next: RenderModel) => {
+  let selectionChanged = !sameSelectionRegion(
+    selectionRegion(previous),
+    selectionRegion(next),
+  );
+  let threadChanged = !sameThreadRegion(
+    threadRegion(previous),
+    threadRegion(next),
+  );
+  let footerChanged = !sameFooterRegion(
+    footerRegion(previous),
+    footerRegion(next),
+  );
+  let selectionKeys = if (selectionChanged) {
+    [SelectionSurface]
+  } else {
+    []
+  };
+  let threadKeys = if (threadChanged) {
+    [ThreadSurface]
+  } else {
+    []
+  };
+  let footerKeys = if (footerChanged) {
+    [FooterSurface]
+  } else {
+    []
+  };
+  List.append(selectionKeys, List.append(threadKeys, footerKeys))
+};
+
+let synchronized = match(commands) => {
+  [] => { [] },
+  _ => {
+    List.append(
+      [Surface.Raw(Ansi.beginSynchronizedUpdate)],
+      List.append(
+        commands,
+        [
+          Surface.Raw(Draw.endFrame),
+          Surface.Raw(Ansi.endSynchronizedUpdate)
+        ],
+      ),
+    )
+  },
+};
+
+let render = (previous, state: UiState, size: Geometry.Size) => {
+  let posts = postsFor(state.feeds, state.view);
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  let start = visibleStart(
+    posts,
+    state.selected,
+    0,
+    WindowLayout(
+      split.feed.width,
+      split.feed.height,
+      size,
+      state.imageScale,
+    ),
+  );
+  let nextModel = RenderModel(state, size, start);
+  match(previous) {
+    None => {
+      let mounted = Reactive.mount(nextModel, renderEffects);
+      Surface.frame(
+        mounted.graph,
+        size,
+        [Surface.Raw(renderFull(state, size))],
+      )
+    },
+    Some(graph) => {
+      if (!sameFeedRegion(feedRegion(graph.model), feedRegion(nextModel))) {
+        let mounted = Reactive.mount(nextModel, renderEffects);
+        Surface.frame(
+          mounted.graph,
+          size,
+          [Surface.Raw(renderFull(state, size))],
+        )
+      } else {
+        let flushed = Reactive.flush(
+          graph,
+          Reactive.Transition(
+            nextModel,
+            changedDependencies(graph.model, nextModel),
+          ),
+          sameRenderDependency,
+        );
+        Surface.frame(flushed.graph, size, synchronized(flushed.output))
+      }
+    },
+  }
+};

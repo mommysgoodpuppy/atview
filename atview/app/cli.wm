@@ -1,7 +1,7 @@
-from "./api.wm" import * as Api;
-from "./auth.wm" import * as Auth;
-from "./views.wm" import * as Views;
-from "./xrpc.wm" import * as Xrpc;
+from "../proto/api.wm" import * as Api;
+from "../proto/auth.wm" import * as Auth;
+from "../proto/views.wm" import * as Views;
+from "../proto/xrpc.wm" import * as Xrpc;
 from js.global("Deno") import {
   args: Js.Array<String>,
 };
@@ -12,19 +12,19 @@ from js.global import {
 let usage = `atview — direct AT Protocol AppView CLI
 
 usage:
-  wm run atview/main.wm -- auth
-  wm run atview/main.wm -- refresh
-  wm run atview/main.wm -- profile <handle-or-did>
-  wm run atview/main.wm -- feed <handle-or-did> [limit]
-  wm run atview/main.wm -- thread <at-uri> [depth]
-  wm run atview/main.wm -- search <query> [limit]
+  wm run atview/app/cli.wm -- auth
+  wm run atview/app/cli.wm -- refresh
+  wm run atview/app/cli.wm -- profile <handle-or-did>
+  wm run atview/app/cli.wm -- feed <handle-or-did> [limit]
+  wm run atview/app/cli.wm -- thread <at-uri> [depth]
+  wm run atview/app/cli.wm -- search <query> [limit]
 
 examples:
-  wm run atview/main.wm -- auth
-  wm run atview/main.wm -- profile atproto.com
-  wm run atview/main.wm -- feed atproto.com 5
-  wm run atview/main.wm -- thread at://did:plc:.../app.bsky.feed.post/... 3
-  wm run atview/main.wm -- search "workman language" 10`;
+  wm run atview/app/cli.wm -- auth
+  wm run atview/app/cli.wm -- profile atproto.com
+  wm run atview/app/cli.wm -- feed atproto.com 5
+  wm run atview/app/cli.wm -- thread at://did:plc:.../app.bsky.feed.post/... 3
+  wm run atview/app/cli.wm -- search "workman language" 10`;
 
 let optionString = (fallback, value) => {
   value :> Option.withDefault(fallback)

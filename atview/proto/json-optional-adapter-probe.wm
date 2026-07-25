@@ -1,3 +1,5 @@
+-- Working explicit optional-property adapter probe.
+
 from js.global("JSON") import {
   parse: (String) => Js.Object,
 } as JSON;

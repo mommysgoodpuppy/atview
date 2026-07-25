@@ -1,8 +1,8 @@
 -- Minimal Kitty graphics protocol support for Ghostty/Kitty-compatible
 -- terminals. PNG bytes are transmitted directly as base64 APC chunks.
 
-from "../views.wm" import { PostImage };
-from "../xrpc.wm" import * as Xrpc;
+from "../proto/views.wm" import { PostImage };
+from "../proto/xrpc.wm" import * as Xrpc;
 from "./ansi.wm" import * as Ansi;
 from "./geometry.wm" import * as Geometry;
 from js.global import { fetch };

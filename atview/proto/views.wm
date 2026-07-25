@@ -1,3 +1,5 @@
+-- Typed projections of AT Protocol view records and unions.
+
 from "./json-boundary.wm" import * as Boundary;
 
 record ProfileCore = {

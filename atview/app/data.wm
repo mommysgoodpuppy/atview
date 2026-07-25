@@ -1,0 +1,196 @@
+-- Converts protocol data into image-aware application models.
+
+from "./model.wm" import *;
+from "../proto/api.wm" import { AppFeeds, FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../proto/xrpc.wm" import { AppError };
+from "../tui/kitty.wm" import * as Kitty;
+
+let rec loadPosts = match(posts, remaining) => {
+  ([], _) => { Task.succeed([]) },
+  ([post, ..tail], _) => {
+    let feedPost: FeedPost = post;
+    let imageTask = if (remaining <= 0) {
+      Task.succeed(None)
+    } else {
+      match(feedPost.image) {
+        None => { Task.succeed(None) },
+        Some(source) => {
+          let typedSource: Views.PostImage = source;
+          Kitty.load(typedSource)
+            :> Task.map(Some)
+            :> Task.recover((_) => { None })
+        },
+      }
+    };
+    let nextRemaining = match(feedPost.image) {
+      Some(_) => {
+        if (remaining <= 0) { 0 } else { remaining - 1 }
+      },
+      None => { remaining },
+    };
+    let avatarTask = match(feedPost.avatar) {
+      None => { Task.succeed(None) },
+      Some(url) => {
+        Kitty.loadAvatar(url)
+          :> Task.map(Some)
+          :> Task.recover((_) => { None })
+      },
+    };
+    Task|
+      imageTask,
+      avatarTask,
+      loadPosts(tail, nextRemaining)
+    | :> Task.map((image, avatar, loadedTail) => {
+      [UiPost(feedPost, image, avatar), ..loadedTail]
+    })
+  },
+};
+
+let loadUiFeeds = (feeds: AppFeeds) => {
+  Task|
+    loadPosts(feeds.timelinePosts, 3),
+    loadPosts(feeds.ownPosts, 3)
+  | :> Task.map((timelinePosts, ownPosts) => {
+    UiFeeds(
+      feeds.handle,
+      feeds.did,
+      feeds.accessJwt,
+      timelinePosts,
+      ownPosts,
+      feeds.timelineCursor,
+      feeds.ownCursor,
+    )
+  })
+};
+
+let apiFeeds = (feeds: UiFeeds) => {
+  AppFeeds(
+    feeds.handle,
+    feeds.did,
+    feeds.accessJwt,
+    [],
+    [],
+    feeds.timelineCursor,
+    feeds.ownCursor,
+  )
+};
+
+let withThread = (state: UiState, thread, version) => {
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    version,
+    thread,
+    state.threadGraph,
+  )
+};
+
+let rec boundThreadNodes = match(nodes, remaining) => {
+  ([], _) => { BoundedThreadNodes([], remaining) },
+  (_, _) => {
+    if (remaining <= 0) {
+      BoundedThreadNodes([], 0)
+    } else {
+      match(nodes) {
+        [] => { BoundedThreadNodes([], remaining) },
+        [node, ..tail] => {
+          match(node) {
+            Views.ThreadPost(post, replies) => {
+              let boundedReplies = boundThreadNodes(replies, remaining - 1);
+              let boundedTail = boundThreadNodes(
+                tail,
+                boundedReplies.remaining,
+              );
+              BoundedThreadNodes(
+                [
+                  Views.ThreadPost(post, boundedReplies.nodes),
+                  ..boundedTail.nodes
+                ],
+                boundedTail.remaining,
+              )
+            },
+            Views.MissingPost(uri) => {
+              let boundedTail = boundThreadNodes(tail, remaining - 1);
+              BoundedThreadNodes(
+                [Views.MissingPost(uri), ..boundedTail.nodes],
+                boundedTail.remaining,
+              )
+            },
+            Views.BlockedPost(uri) => {
+              let boundedTail = boundThreadNodes(tail, remaining - 1);
+              BoundedThreadNodes(
+                [Views.BlockedPost(uri), ..boundedTail.nodes],
+                boundedTail.remaining,
+              )
+            },
+            Views.UnknownThread(typeName) => {
+              let boundedTail = boundThreadNodes(tail, remaining - 1);
+              BoundedThreadNodes(
+                [Views.UnknownThread(typeName), ..boundedTail.nodes],
+                boundedTail.remaining,
+              )
+            },
+          }
+        },
+      }
+    }
+  },
+};
+
+let rec loadUiThreadNodes = match(nodes) => {
+  [] => { Task.succeed([]) },
+  [node, ..tail] => {
+    match(node) {
+      Views.ThreadPost(post, replies) => {
+        let avatarTask = match(post.author.avatar) {
+          None => { Task.succeed(None) },
+          Some(url) => {
+            Kitty.loadAvatar(url)
+              :> Task.map(Some)
+              :> Task.recover((_) => { None })
+          },
+        };
+        Task|
+          avatarTask,
+          loadUiThreadNodes(replies),
+          loadUiThreadNodes(tail)
+        | :> Task.map((avatar, loadedReplies, loadedTail) => {
+          [
+            UiThreadPost(post, avatar, loadedReplies),
+            ..loadedTail
+          ]
+        })
+      },
+      Views.MissingPost(uri) => {
+        loadUiThreadNodes(tail) :> Task.map((loadedTail) => {
+          [UiMissingPost(uri), ..loadedTail]
+        })
+      },
+      Views.BlockedPost(uri) => {
+        loadUiThreadNodes(tail) :> Task.map((loadedTail) => {
+          [UiBlockedPost(uri), ..loadedTail]
+        })
+      },
+      Views.UnknownThread(typeName) => {
+        loadUiThreadNodes(tail) :> Task.map((loadedTail) => {
+          [UiUnknownThread(typeName), ..loadedTail]
+        })
+      },
+    }
+  },
+};
+
+let loadUiThread = (thread: Views.Thread) => {
+  let bounded = boundThreadNodes([thread], 13);
+  loadUiThreadNodes(bounded.nodes) :> Task.map((nodes) => {
+    match(nodes) {
+      [node, .._] => { node },
+      [] => { UiUnknownThread("(empty thread)") },
+    }
+  })
+};

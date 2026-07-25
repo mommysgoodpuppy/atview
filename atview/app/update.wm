@@ -1,0 +1,238 @@
+-- Application event transitions and asynchronous feed pagination.
+
+from "./data.wm" import { apiFeeds, loadPosts };
+from "./graph.wm" import { buildPrefetchPlan, loadSelectedThread };
+from "./model.wm" import *;
+from "../proto/api.wm" import {
+  FeedPage,
+  loadMoreOwnPosts,
+  loadMoreTimeline,
+};
+from "../proto/xrpc.wm" import { AppError, describeError };
+from "../tui/command.wm" import * as Command;
+from "../tui/event.wm" import * as Event;
+
+let loadedState = match(state, requestedView, page, posts) => {
+  (_, _, _, _) => {
+    let feeds = match(requestedView) {
+      Timeline => {
+        UiFeeds(
+          state.feeds.handle,
+          state.feeds.did,
+          state.feeds.accessJwt,
+          List.append(state.feeds.timelinePosts, posts),
+          state.feeds.ownPosts,
+          page.cursor,
+          state.feeds.ownCursor,
+        )
+      },
+      OwnPosts => {
+        UiFeeds(
+          state.feeds.handle,
+          state.feeds.did,
+          state.feeds.accessJwt,
+          state.feeds.timelinePosts,
+          List.append(state.feeds.ownPosts, posts),
+          state.feeds.timelineCursor,
+          page.cursor,
+        )
+      },
+    };
+    let status = if (state.view == requestedView) {
+      if (List.length(posts) > 0) { "" } else { "end of feed" }
+    } else {
+      state.status
+    };
+    UiState(
+      state.selected,
+      state.view,
+      state.imageScale,
+      feeds,
+      false,
+      status,
+      state.renderVersion + 1,
+      state.thread,
+      state.threadGraph,
+    )
+  },
+};
+
+let loadNextPage = (state: UiState) => {
+  let requestedView = state.view;
+  let request = match(state.view) {
+    Timeline => { loadMoreTimeline(apiFeeds(state.feeds), 30) },
+    OwnPosts => { loadMoreOwnPosts(apiFeeds(state.feeds), 30) },
+  };
+  let plan = buildPrefetchPlan(state);
+  let pending = UiState(
+    plan.state.selected,
+    plan.state.view,
+    plan.state.imageScale,
+    plan.state.feeds,
+    true,
+    "",
+    plan.state.renderVersion,
+    plan.state.thread,
+    plan.state.threadGraph,
+  );
+  let task = request
+    :> Task.andThen((page: FeedPage) => {
+      loadPosts(page.posts, 3) :> Task.map((posts) => {
+        (page, posts)
+      })
+    })
+    :> Task.map((loadedPage) => {
+      let (page, posts) = loadedPage;
+      (current: UiState) => {
+        loadedState(current, requestedView, page, posts)
+      }
+    })
+    :> Task.recover((error) => {
+      (current: UiState) => {
+        UiState(
+          current.selected,
+          current.view,
+          current.imageScale,
+          current.feeds,
+          false,
+          describeError(error),
+          current.renderVersion,
+          current.thread,
+          current.threadGraph,
+        )
+      }
+    });
+  Command.SpawnMany(pending, [task, ..plan.tasks])
+};
+
+let hasMore = match(state) => {
+  _ => {
+    match(state.view) {
+      Timeline => {
+        match(state.feeds.timelineCursor) {
+          Some(_) => { true },
+          None => { false },
+        }
+      },
+      OwnPosts => {
+        match(state.feeds.ownCursor) {
+          Some(_) => { true },
+          None => { false },
+        }
+      },
+    }
+  },
+};
+
+let moveDown = (state) => {
+  let count = List.length(postsFor(state.feeds, state.view));
+  let next = move(count, 1, state);
+  if (!state.loading && hasMore(state) && next.selected >= count - 3) {
+    loadNextPage(next)
+  } else {
+    if (next.selected == state.selected) {
+      Command.Continue(next)
+    } else {
+      loadSelectedThread(next)
+    }
+  }
+};
+
+let updateState = match(key, state) => {
+  (Event.CtrlC, _) => { Command.Quit },
+  (Event.Character("q"), _) => { Command.Quit },
+  (Event.Character("t"), _) => {
+    loadSelectedThread(
+      UiState(
+        0,
+        Timeline,
+        state.imageScale,
+        state.feeds,
+        state.loading,
+        "",
+        state.renderVersion + 1,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  (Event.Character("m"), _) => {
+    loadSelectedThread(
+      UiState(
+        0,
+        OwnPosts,
+        state.imageScale,
+        state.feeds,
+        state.loading,
+        "",
+        state.renderVersion + 1,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  (Event.Character("f"), _) => {
+    Command.Continue(
+      UiState(
+        state.selected,
+        state.view,
+        toggleImageScale(state.imageScale),
+        state.feeds,
+        state.loading,
+        state.status,
+        state.renderVersion + 1,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  (Event.Up, _) => {
+    let next = move(List.length(postsFor(state.feeds, state.view)), -1, state);
+    if (next.selected == state.selected) {
+      Command.Continue(next)
+    } else {
+      loadSelectedThread(next)
+    }
+  },
+  (Event.Character("k"), _) => {
+    let next = move(List.length(postsFor(state.feeds, state.view)), -1, state);
+    if (next.selected == state.selected) {
+      Command.Continue(next)
+    } else {
+      loadSelectedThread(next)
+    }
+  },
+  (Event.Down, _) => { moveDown(state) },
+  (Event.Character("j"), _) => { moveDown(state) },
+  (Event.Home, _) => {
+    loadSelectedThread(
+      UiState(
+        0,
+        state.view,
+        state.imageScale,
+        state.feeds,
+        state.loading,
+        state.status,
+        state.renderVersion,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  (Event.End, _) => {
+    loadSelectedThread(
+      UiState(
+        List.length(postsFor(state.feeds, state.view)) - 1,
+        state.view,
+        state.imageScale,
+        state.feeds,
+        state.loading,
+        state.status,
+        state.renderVersion,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  _ => { Command.Continue(state) },
+};

@@ -1,7 +1,8 @@
 -- Reduction for whether Api.OwnFeed itself, rather than loadOwnFeed's Task,
 -- conflicts with a generic runtime closure.
 
-from "../api.wm" import { OwnFeed };
+from "../proto/api.wm" import { OwnFeed };
+from "./command.wm" import * as Command;
 from "./draw.wm" import * as Draw;
 from "./event.wm" import * as Event;
 from "./geometry.wm" import * as Geometry;
@@ -16,9 +17,9 @@ let start = (feed: OwnFeed) => {
     FeedState(0),
     (key, state: FeedState) => {
       match(key) {
-        Event.Character("q") => { Runtime.Quit },
-        Event.CtrlC => { Runtime.Quit },
-        _ => { Runtime.Continue(state) },
+        Event.Character("q") => { Command.Quit },
+        Event.CtrlC => { Command.Quit },
+        _ => { Command.Continue(state) },
       }
     },
     (_, state: FeedState, size: Geometry.Size) => {

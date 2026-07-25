@@ -1,3 +1,5 @@
+-- AT Protocol session authentication and local credential loading.
+
 from "./xrpc.wm" import * as Xrpc;
 from js.global("Deno") import { readTextFile };
 from js.global import { fetch };

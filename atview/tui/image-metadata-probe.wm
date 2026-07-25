@@ -1,9 +1,9 @@
 -- Retained probe for the AppView image union boundary. It prints only public
 -- CDN metadata, never credentials or session tokens.
 
-from "../api.wm" import { AppFeeds, FeedPost, loadAppFeeds };
-from "../views.wm" import { PostImage };
-from "../xrpc.wm" import { AppError, describeError };
+from "../proto/api.wm" import { AppFeeds, FeedPost, loadAppFeeds };
+from "../proto/views.wm" import { PostImage };
+from "../proto/xrpc.wm" import { AppError, describeError };
 
 let rec firstImage = match(posts) => {
   [] => { None },

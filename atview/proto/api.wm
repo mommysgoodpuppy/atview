@@ -1,3 +1,5 @@
+-- Typed AT Protocol endpoint projections.
+
 from "./auth.wm" import * as Auth;
 from "./xrpc.wm" import * as Xrpc;
 from "./views.wm" import * as Views;

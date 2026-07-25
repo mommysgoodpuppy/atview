@@ -1,0 +1,202 @@
+-- View-graph lookahead, thread caching, and background prefetch planning.
+
+from "./data.wm" import { loadUiThread, withThread };
+from "./model.wm" import *;
+from "../proto/api.wm" import { FeedPost, threadAuthenticated };
+from "../proto/xrpc.wm" import { AppError, describeError };
+from "../tui/command.wm" import * as Command;
+from "../util/list.wm" import * as ListExtra;
+
+let selectedUri = (state: UiState) => {
+  List.at(postsFor(state.feeds, state.view), state.selected)
+    :> Option.map((item) => { item.post.uri })
+};
+
+let rec findThreadResource = (uri, graph) => {
+  match(graph) {
+    [] => { None },
+    [node, ..rest] => {
+      if (node.uri == uri) {
+        Some(node.resource)
+      } else {
+        findThreadResource(uri, rest)
+      }
+    },
+  }
+};
+
+let putThreadNode = (uri, resource, graph) => {
+  [
+    ThreadNode(uri, resource),
+    ..ListExtra.removeFirstBy(
+      uri,
+      graph,
+      (target: String, node: ThreadNode) => { target == node.uri },
+    )
+  ]
+};
+
+let withThreadGraph = (state: UiState, graph) => {
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    graph,
+  )
+};
+
+let threadModel = match(uri, resource) => {
+  (_, ThreadPending) => { ThreadLoading(uri) },
+  (_, ThreadCached(thread)) => { ThreadReady(uri, thread) },
+  (_, ThreadCacheFailed(message)) => { ThreadFailed(uri, message) },
+};
+
+let publishThreadResource = (state: UiState, uri, resource) => {
+  let cached = withThreadGraph(
+    state,
+    putThreadNode(uri, resource, state.threadGraph),
+  );
+  if (selectedUri(cached) == Some(uri)) {
+    withThread(
+      cached,
+      threadModel(uri, resource),
+      cached.renderVersion,
+    )
+  } else {
+    cached
+  }
+};
+
+let prefetchThreadTask = (state: UiState, uri) => {
+  threadAuthenticated(state.feeds.accessJwt, uri, 2)
+    :> Task.andThen(loadUiThread)
+    :> Task.map((thread) => { ThreadCached(thread) })
+    :> Task.recover((error) => {
+      ThreadCacheFailed(describeError(error))
+    })
+    :> Task.map((resource) => {
+      (current: UiState) => {
+        publishThreadResource(current, uri, resource)
+      }
+    })
+};
+
+let uriAt = (state: UiState, index) => {
+  List.at(postsFor(state.feeds, state.view), index)
+    :> Option.map((item) => { item.post.uri })
+};
+
+let frontierUris = (state: UiState) => {
+  ListExtra.choose([
+    uriAt(state, state.selected),
+    uriAt(state, state.selected + 1),
+    uriAt(state, state.selected - 1),
+    uriAt(state, state.selected + 2),
+    uriAt(state, state.selected - 2),
+  ])
+};
+
+let rec pruneThreadGraph = match(frontier, graph) => {
+  (_, []) => { [] },
+  (_, [node, ..rest]) => {
+    let tail = pruneThreadGraph(frontier, rest);
+    match(node.resource) {
+      ThreadPending => { [node, ..tail] },
+      _ => {
+        if (ListExtra.containsBy(
+          node.uri,
+          frontier,
+          (left: String, right: String) => { left == right },
+        )) {
+          [node, ..tail]
+        } else {
+          tail
+        }
+      },
+    }
+  },
+};
+
+let rec planThreadPrefetchLimit = (state, uris, available) => {
+  if (available <= 0) {
+    PrefetchPlan(state, [])
+  } else {
+    match(uris) {
+      [] => { PrefetchPlan(state, []) },
+      [uri, ..rest] => {
+        match(findThreadResource(uri, state.threadGraph)) {
+          Some(_) => {
+            planThreadPrefetchLimit(state, rest, available)
+          },
+          None => {
+            let pending = withThreadGraph(
+              state,
+              putThreadNode(uri, ThreadPending, state.threadGraph),
+            );
+            let tailPlan = planThreadPrefetchLimit(
+              pending,
+              rest,
+              available - 1,
+            );
+            PrefetchPlan(
+              tailPlan.state,
+              [prefetchThreadTask(state, uri), ..tailPlan.tasks],
+            )
+          },
+        }
+      },
+    }
+  }
+};
+
+let planThreadPrefetch = (state: UiState, uris) => {
+  let counts = graphCounts(state.threadGraph);
+  planThreadPrefetchLimit(state, uris, 5 - counts.pending)
+};
+
+let prepareSelectedThread = (state: UiState) => {
+  match(selectedUri(state)) {
+    None => { state },
+    Some(uri) => {
+      match(findThreadResource(uri, state.threadGraph)) {
+        None => {
+          withThread(state, ThreadLoading(uri), state.renderVersion)
+        },
+        Some(resource) => {
+          withThread(
+            state,
+            threadModel(uri, resource),
+            state.renderVersion,
+          )
+        },
+      }
+    },
+  }
+};
+
+let buildPrefetchPlan = (state: UiState) => {
+  let prepared = prepareSelectedThread(state);
+  let frontier = frontierUris(prepared);
+  let bounded = withThreadGraph(
+    prepared,
+    pruneThreadGraph(frontier, prepared.threadGraph),
+  );
+  planThreadPrefetch(bounded, frontier)
+};
+
+let scheduleThreadPrefetch = (state: UiState) => {
+  let plan = buildPrefetchPlan(state);
+  match(plan.tasks) {
+    [] => { Command.Continue(plan.state) },
+    _ => { Command.SpawnMany(plan.state, plan.tasks) },
+  }
+};
+
+let loadSelectedThread = (state: UiState) => {
+  scheduleThreadPrefetch(state)
+};

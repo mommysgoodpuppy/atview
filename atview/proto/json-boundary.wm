@@ -1,4 +1,4 @@
--- Helpers which turn nullish/dynamic JavaScript properties into real Workman
+-- Protocol JSON helpers which turn nullish/dynamic JavaScript properties into real Workman
 -- carrier values. Json.assert does not adapt record Option fields by itself.
 
 from js.global("Reflect") import {

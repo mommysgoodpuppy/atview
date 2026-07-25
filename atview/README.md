@@ -7,21 +7,21 @@ Lexicon projections are implemented directly.
 ## Commands
 
 ```sh
-wm run atview/tui/app.wm
-wm run atview/main.wm -- profile <handle-or-did>
-wm run atview/main.wm -- feed <handle-or-did> [limit]
-wm run atview/main.wm -- thread <at-uri> [depth]
-wm run atview/main.wm -- search <query> [limit]
-wm run atview/main.wm -- auth
-wm run atview/main.wm -- refresh
+wm run atview/app/main.wm
+wm run atview/app/cli.wm -- profile <handle-or-did>
+wm run atview/app/cli.wm -- feed <handle-or-did> [limit]
+wm run atview/app/cli.wm -- thread <at-uri> [depth]
+wm run atview/app/cli.wm -- search <query> [limit]
+wm run atview/app/cli.wm -- auth
+wm run atview/app/cli.wm -- refresh
 ```
 
 Examples:
 
 ```sh
-wm run atview/main.wm -- profile atproto.com
-wm run atview/main.wm -- feed atproto.com 5
-wm run atview/main.wm -- thread \
+wm run atview/app/cli.wm -- profile atproto.com
+wm run atview/app/cli.wm -- feed atproto.com 5
+wm run atview/app/cli.wm -- thread \
   'at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/app.bsky.feed.post/3mrfjlbkj5s2k' 2
 ```
 
@@ -57,15 +57,30 @@ handle and DID. Tokens are retained in memory for the duration of one command an
 
 ## Architecture
 
-- `xrpc.wm` — query parameters, URL encoding, and application errors.
-- `auth.wm` — dotenv loading, session creation, and refresh-token rotation.
-- `api.wm` — carrier-oriented public/authenticated HTTPS transport and endpoint procedures.
-- `json-boundary.wm` — conversion of nullish dynamic properties into real Workman options.
-- `views.wm` — nominal profile/post/feed views and recursive thread union decoding.
-- `main.wm` — command selection and terminal rendering.
-- `tui/` — Workman-native raw-terminal runtime, layout/drawing/widget primitives, and interactive
-  AppView browser. It directly owns ANSI output and Node terminal FFI rather than importing a TUI
-  library.
+- `proto/` — AT Protocol ownership: XRPC URL/error handling, authentication, JSON boundaries,
+  nominal Lexicon views, HTTPS transport, and endpoint procedures.
+- `app/` — atview ownership: CLI and TUI entrypoints, immutable application model, data projection,
+  view-graph prefetching, event transitions, feed/thread views, and incremental rendering.
+- `tui/` — reusable Workman terminal framework. It owns ANSI/Kitty output, geometry, drawing,
+  immutable command scheduling, the Node terminal runtime, retained surfaces, and reactive effects.
+- `util/` — general helpers that do not belong to AT Protocol or terminal UI. These are candidates
+  for later library or standard-library extraction.
+- `proto/xrpc.wm` — query parameters, URL encoding, and application errors.
+- `proto/auth.wm` — dotenv loading, session creation, and refresh-token rotation.
+- `proto/api.wm` — carrier-oriented public/authenticated HTTPS transport and endpoint procedures.
+- `proto/json-boundary.wm` — nullish dynamic properties converted into Workman options.
+- `proto/views.wm` — nominal profile/post/feed views and recursive thread union decoding.
+- `app/main.wm` — small interactive entrypoint wiring data, updates, prefetch, rendering, and runtime.
+- `app/cli.wm` — non-interactive command selection and text output.
+- `app/model.wm` — immutable application and render models.
+- `app/data.wm`, `app/graph.wm`, `app/update.wm` — protocol projection, lookahead cache, and event
+  transitions.
+- `app/feed-view.wm`, `app/thread-view.wm`, `app/view.wm`, `app/render.wm` — feed/thread drawing,
+  shared screen composition, and reactive retained rendering.
+- `tui/command.wm` — pure `Step` command algebra and concurrent task scheduler.
+- `tui/runtime.wm` — raw terminal host loop and retained-frame orchestration.
+- `tui/element.wm` — recursive, typed terminal elements for JSX-like composition with ordinary
+  Workman functions and values; one interpreter lowers fragments, text, boxes, and images.
 - `tui/reactive.wm` — immutable signal/effect graph with carrier composition, dynamic dependency
   capture, effect cleanup, and dirty-key flushing.
 - `tui/surface.wm` — typed terminal commands and the final command-to-ANSI/Kitty host boundary.
@@ -83,6 +98,9 @@ handle and DID. Tokens are retained in memory for the duration of one command an
   `json-optional-adapter-probe.wm`.
 - A Response-touching Task procedure failed delayed FFI specialization when exported across a
   Workman module boundary. Keeping it beside concrete endpoint uses works.
+- Imported function signatures can contain transitive nominal types that the block escape check
+  mistakes for block-local types unless the consumer explicitly imports them. See
+  `wm-mini/markdown/issues/transitive-imported-nominal-fails-block-escape-check.md`.
 - Required nested records and recursive `$type` unions can be projected without reducing the whole
   payload to `Js.Object`.
 
