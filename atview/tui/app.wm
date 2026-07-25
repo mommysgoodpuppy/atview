@@ -1,0 +1,2002 @@
+-- First real consumer of the Workman TUI library.
+-- Authenticates, loads the configured account's home timeline and author feed
+-- directly over XRPC, then browses them without exposing credentials or tokens.
+
+from "../api.wm" import {
+  AppFeeds,
+  FeedPage,
+  FeedPost,
+  loadAppFeeds,
+  loadMoreOwnPosts,
+  loadMoreTimeline,
+  threadAuthenticated,
+};
+from "../views.wm" import * as Views;
+from "../xrpc.wm" import { AppError, describeError };
+from "./ansi.wm" import * as Ansi;
+from "./draw.wm" import * as Draw;
+from "./event.wm" import * as Event;
+from "./geometry.wm" import * as Geometry;
+from "./kitty.wm" import * as Kitty;
+from "./reactive.wm" import * as Reactive;
+from "./runtime.wm" import * as Runtime;
+from "./surface.wm" import * as Surface;
+
+type FeedView = Timeline | OwnPosts;
+
+type UiThread =
+  | UiThreadPost<Views.Post, Option<Kitty.Image>, List<UiThread>>
+  | UiMissingPost<String>
+  | UiBlockedPost<String>
+  | UiUnknownThread<String>;
+
+type ThreadModel =
+  | ThreadLoading<String>
+  | ThreadReady<String, UiThread>
+  | ThreadFailed<String, String>;
+
+type ThreadResource =
+  | ThreadPending
+  | ThreadCached<UiThread>
+  | ThreadCacheFailed<String>;
+
+record ThreadNode = {
+  uri: String,
+  resource: ThreadResource,
+};
+
+record UiPost = {
+  post: FeedPost,
+  image: Option<Kitty.Image>,
+  avatar: Option<Kitty.Image>,
+};
+
+record UiFeeds = {
+  handle: String,
+  did: String,
+  accessJwt: String,
+  timelinePosts: List<UiPost>,
+  ownPosts: List<UiPost>,
+  timelineCursor: Option<String>,
+  ownCursor: Option<String>,
+};
+
+record UiState = {
+  selected: Number,
+  view: FeedView,
+  imageScale: Kitty.Scale,
+  feeds: UiFeeds,
+  loading: Bool,
+  status: String,
+  renderVersion: Number,
+  thread: ThreadModel,
+  threadGraph: List<ThreadNode>,
+};
+
+record FeedLayout = {
+  width: Number,
+  size: Geometry.Size,
+  scale: Kitty.Scale,
+};
+
+record WindowLayout = {
+  width: Number,
+  height: Number,
+  size: Geometry.Size,
+  scale: Kitty.Scale,
+};
+
+record CardCursor = {
+  selected: Number,
+  index: Number,
+};
+
+record PostRows = {
+  first: String,
+  second: String,
+};
+
+record PaneLayout = {
+  feed: Geometry.Rect,
+  thread: Geometry.Rect,
+};
+
+record ReplyRender = {
+  output: String,
+  nextRow: Number,
+  nextImageId: Number,
+};
+
+record ReplyCursor = {
+  depth: Number,
+  row: Number,
+  imageId: Number,
+};
+
+record BoundedThreadNodes = {
+  nodes: List<Views.Thread>,
+  remaining: Number,
+};
+
+record PrefetchPlan = {
+  state: UiState,
+  tasks: List<Task<(UiState) => UiState, AppError>>,
+};
+
+record GraphCounts = {
+  ready: Number,
+  pending: Number,
+};
+
+record BorderRender = {
+  cursor: CardCursor,
+  layout: FeedLayout,
+  target: Number,
+  active: Bool,
+  standalone: Bool,
+};
+
+record FeedRegion = {
+  renderVersion: Number,
+  start: Number,
+  size: Geometry.Size,
+};
+
+record SelectionRegion = {
+  selected: Number,
+  start: Number,
+};
+
+record ThreadRegion = {
+  selected: Number,
+  renderVersion: Number,
+  imageScale: Kitty.Scale,
+  threadKey: String,
+  size: Geometry.Size,
+};
+
+record FooterRegion = {
+  selected: Number,
+  count: Number,
+  view: FeedView,
+  loading: Bool,
+  status: String,
+  graphReady: Number,
+  graphPending: Number,
+  size: Geometry.Size,
+};
+
+type RenderDependency =
+  | SelectionSurface
+  | ThreadSurface
+  | FooterSurface;
+
+record RenderModel = {
+  state: UiState,
+  size: Geometry.Size,
+  start: Number,
+};
+
+let rec length = match(values) => {
+  [] => { 0 },
+  [_, ..tail] => { 1 + length(tail) },
+};
+
+let rec graphCounts = match(graph) => {
+  [] => { GraphCounts(0, 0) },
+  [node, ..rest] => {
+    let tail = graphCounts(rest);
+    match(node.resource) {
+      ThreadPending => {
+        GraphCounts(tail.ready, tail.pending + 1)
+      },
+      ThreadCached(_) => {
+        GraphCounts(tail.ready + 1, tail.pending)
+      },
+      ThreadCacheFailed(_) => {
+        GraphCounts(tail.ready, tail.pending)
+      },
+    }
+  },
+};
+
+let rec atIndex = match(values, index) => {
+  ([], _) => { None },
+  ([head, .._], 0) => { Some(head) },
+  ([_, ..tail], _) => {
+    if (index < 0) { None } else { atIndex(tail, index - 1) }
+  },
+};
+
+let rec dropItems = match(values, count) => {
+  (_, 0) => { values },
+  ([], _) => { [] },
+  ([_, ..tail], _) => {
+    if (count < 0) { values } else { dropItems(tail, count - 1) }
+  },
+  _ => { values },
+};
+
+let panes = (body, size) => {
+  let requested = Geometry.aspectColumns(body.height, size, 9, 19.5);
+  let leftWidth = if (body.width < 56 || requested <= 0) {
+    Geometry.percentOf(body.width, 48)
+  } else {
+    Geometry.clamp(20, body.width - 31, requested)
+  };
+  let (feed, thread) = Geometry.splitColumns(body, leftWidth, 1);
+  PaneLayout(feed, thread)
+};
+
+let countText = (value) => {
+  value :> Option.map(Result.textOf) :> Option.withDefault("0")
+};
+
+let move = (count, delta, state) => {
+  let selected = Geometry.clamp(0, count - 1, state.selected + delta);
+  UiState(
+    selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    state.threadGraph,
+  )
+};
+
+let toggleImageScale = match(scale) => {
+  Kitty.Fit => { Kitty.Fill },
+  Kitty.Fill => { Kitty.Fit },
+};
+
+let imageScaleName = match(scale) => {
+  Kitty.Fit => { "fit" },
+  Kitty.Fill => { "fill" },
+};
+
+let postsFor = match(feeds, view) => {
+  (_, Timeline) => { feeds.timelinePosts },
+  (_, OwnPosts) => { feeds.ownPosts },
+};
+
+let titleFor = match(feeds, view) => {
+  (_, Timeline) => { "timeline" },
+  (_, OwnPosts) => { "@" ++ feeds.handle },
+};
+
+let wrapOnce = (text, width) => {
+  let cleaned = text :> .replaceAll("\n", " ") :> Result.withDefault(text);
+  let size = cleaned :> .length :> Result.withDefault(0);
+  if (width <= 0 || size <= width) {
+    (cleaned, "")
+  } else {
+    let candidate = cleaned :> .slice(0, width + 1) :> Result.withDefault(cleaned);
+    let space = candidate :> .lastIndexOf(" ") :> Result.withDefault(-1);
+    let boundary = if (space <= 0) { width } else { space };
+    let next = if (space <= 0) { boundary } else { boundary + 1 };
+    (
+      cleaned :> .slice(0, boundary) :> Result.withDefault(""),
+      cleaned :> .slice(next) :> Result.withDefault(""),
+    )
+  }
+};
+
+let postRows = (text, width) => {
+  let (first, afterFirst) = wrapOnce(text, width);
+  let (second, remaining) = wrapOnce(afterFirst, width);
+  let finalSecond = if (remaining == "" || width <= 1) {
+    second
+  } else {
+    (second :> .slice(0, width - 1) :> Result.withDefault(second)) ++ "…"
+  };
+  PostRows(first, finalSecond)
+};
+
+let rec wrapLines = match(text, width, remaining) => {
+  (_, _, 0) => { [] },
+  ("", _, _) => { [] },
+  (_, _, _) => {
+    let (line, rest) = wrapOnce(text, width);
+    let next = if (rest == text) { "" } else { rest };
+    [line, ..wrapLines(next, width, remaining - 1)]
+  },
+};
+
+let rec indentation = (depth) => {
+  if (depth <= 0) { "" } else { "  " ++ indentation(depth - 1) }
+};
+
+let metrics = (post) => {
+  countText(post.replyCount) ++ " replies   " ++
+    countText(post.repostCount) ++ " reposts   " ++
+    countText(post.likeCount) ++ " likes"
+};
+
+let imageRows = (width, maximum, size, scale, item) => {
+  match(item.image) {
+    None => { 0 },
+    Some(image) => {
+      if (maximum <= 0 || width <= 0) {
+        0
+      } else {
+        match(scale) {
+          Kitty.Fill => { maximum },
+          Kitty.Fit => {
+            let placed = Kitty.fitPlacement(
+              Geometry.rect(0, 0, width, maximum),
+              size,
+              image,
+            );
+            placed.rows
+          },
+        }
+      }
+    },
+  }
+};
+
+let baseCardHeight = (width, size, item) => {
+  let avatarColumns = match(item.avatar) {
+    Some(_) => { Kitty.squareColumns(2, size) },
+    None => { 0 },
+  };
+  let textWidth = Geometry.nonNegative(
+    width - 2 - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
+  );
+  let text = postRows(item.post.text, textWidth);
+  if (text.second == "") { 5 } else { 6 }
+};
+
+let maximumCardHeight = (size: Geometry.Size) => {
+  Geometry.clamp(
+    8,
+    14,
+    Geometry.percentOf(Geometry.nonNegative(size.height - 1), 60),
+  )
+};
+
+let cardHeight = (width, size, scale, item) => {
+  let base = baseCardHeight(width, size, item);
+  let avatarColumns = match(item.avatar) {
+    Some(_) => { Kitty.squareColumns(2, size) },
+    None => { 0 },
+  };
+  let mediaWidth = Geometry.nonNegative(
+    width - 2 - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
+  );
+  let maximumImageRows = Geometry.nonNegative(maximumCardHeight(size) - base);
+  base + imageRows(mediaWidth, maximumImageRows, size, scale, item)
+};
+
+let rec heightOfFirst = (posts, count, layout: FeedLayout) => {
+  if (count <= 0) {
+    0
+  } else {
+    match(posts) {
+      [] => { 0 },
+      [item, ..tail] => {
+        let height = cardHeight(layout.width, layout.size, layout.scale, item);
+        let rest = heightOfFirst(tail, count - 1, layout);
+        height + (if (rest <= 0) { 0 } else { rest - 1 })
+      },
+    }
+  }
+};
+
+let rec visibleStart = (posts, selected, start, window: WindowLayout) => {
+  let layout = FeedLayout(window.width, window.size, window.scale);
+  let needed = heightOfFirst(
+    dropItems(posts, start),
+    selected - start + 1,
+    layout,
+  );
+  if (needed <= window.height || start >= selected) {
+    start
+  } else {
+    visibleStart(posts, selected, start + 1, window)
+  }
+};
+
+let renderCard = (area, item, size, scale, joinedBottom, avatarId) => {
+  let innerWidth = Geometry.nonNegative(area.width - 2);
+  let avatarRows = if (area.height > 3) { 2 } else { 0 };
+  let avatarColumns = match(item.avatar) {
+    Some(_) => { Kitty.squareColumns(avatarRows, size) },
+    None => { 0 },
+  };
+  let textX = area.x + 1 + avatarColumns +
+    (if (avatarColumns > 0) { 1 } else { 0 });
+  let textWidth = Geometry.nonNegative(
+    innerWidth - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
+  );
+  let text = postRows(item.post.text, textWidth);
+  let secondLine = text.second != "";
+  let mediaRow = if (secondLine) { 4 } else { 3 };
+  let metricsRow = Geometry.nonNegative(area.height - 2);
+  let rows = imageRows(
+    textWidth,
+    Geometry.nonNegative(metricsRow - mediaRow),
+    size,
+    scale,
+    item,
+  );
+  let cardText = (row, x, width, value, textStyle) => {
+    if (row >= area.height - 1) {
+      ""
+    } else {
+      Draw.text(
+        Geometry.rect(x, area.y + row, width, 1),
+        value,
+        textStyle,
+      )
+    }
+  };
+  let avatarOutput = match(item.avatar) {
+    None => { "" },
+    Some(avatar) => {
+      Kitty.renderWithId(
+        avatarId,
+        Geometry.rect(area.x + 1, area.y + 1, avatarColumns, avatarRows),
+        size,
+        Kitty.Fill,
+        avatar,
+      )
+    },
+  };
+  let imageOutput = match(item.image) {
+    None => { "" },
+    Some(image) => {
+      Kitty.renderWithId(
+        99000 + avatarId,
+        Geometry.rect(textX, area.y + mediaRow, textWidth, rows),
+        size,
+        scale,
+        image,
+      )
+    },
+  };
+  Draw.timelineBox(area, false, area.y > 0, joinedBottom) ++
+    cardText(
+      1,
+      textX,
+      textWidth,
+      item.post.authorName ++ "  @" ++ item.post.authorHandle,
+      Draw.plain,
+    ) ++
+    cardText(
+      2,
+      textX,
+      textWidth,
+      text.first,
+      Draw.plain,
+    ) ++
+    (if (secondLine) {
+      cardText(
+        3,
+        textX,
+        textWidth,
+      text.second,
+      Draw.plain,
+      )
+    } else {
+      ""
+    }) ++
+    cardText(
+      metricsRow,
+      textX,
+      textWidth,
+      metrics(item.post) ++ "   " ++ item.post.createdAt,
+      Draw.muted,
+    ) ++
+    avatarOutput ++
+    imageOutput
+};
+
+let rec renderCards = match(area, posts, index, layout) => {
+  (_, [], _, _) => { "" },
+  (_, _, _, _) => {
+    match(posts) {
+      [] => { "" },
+      [item, ..tail] => {
+        let height = cardHeight(area.width, layout.size, layout.scale, item);
+        if (area.height < 2) {
+          Draw.fill(area, "─", Draw.muted)
+        } else {
+          let visibleHeight = Geometry.clamp(2, height, area.height);
+          let joinedBottom = match(tail) {
+            [] => { false },
+            _ => { area.height > visibleHeight },
+          };
+          renderCard(
+            Geometry.rect(area.x, area.y, area.width, visibleHeight),
+            item,
+            layout.size,
+            layout.scale,
+            joinedBottom,
+            1000 + index,
+          ) ++ renderCards(
+            Geometry.rect(
+              area.x,
+              area.y + visibleHeight - 1,
+              area.width,
+              area.height - visibleHeight + 1,
+            ),
+            tail,
+            index + 1,
+            layout,
+          )
+        }
+      },
+    }
+  },
+};
+
+let rec renderReplies = match(area, size, nodes, cursor) => {
+  (_, _, [], _) => {
+    ReplyRender("", cursor.row, cursor.imageId)
+  },
+  (_, _, _, _) => {
+    if (cursor.row >= area.height) {
+      ReplyRender("", cursor.row, cursor.imageId)
+    } else {
+      match(nodes) {
+        [] => { ReplyRender("", cursor.row, cursor.imageId) },
+        [node, ..tail] => {
+          match(node) {
+            UiThreadPost(post, avatar, children) => {
+              let avatarRows = 2;
+              let nestingColumns = Geometry.clamp(
+                0,
+                Geometry.nonNegative(area.width - 1),
+                cursor.depth * 2,
+              );
+              let requestedAvatarColumns = match(avatar) {
+                Some(_) => { Kitty.squareColumns(avatarRows, size) },
+                None => { 0 },
+              };
+              let avatarColumns = if (
+                nestingColumns + requestedAvatarColumns < area.width
+              ) {
+                requestedAvatarColumns
+              } else {
+                0
+              };
+              let avatarX = area.x + nestingColumns;
+              let prefix = "↳ ";
+              let textX = avatarX + avatarColumns +
+                (if (avatarColumns > 0) { 1 } else { 0 });
+              let availableWidth = Geometry.nonNegative(
+                area.width - nestingColumns - avatarColumns -
+                  (if (avatarColumns > 0) { 1 } else { 0 }),
+              );
+              let name = post.author.displayName
+                :> Option.withDefault(post.author.handle);
+              let textWidth = Geometry.nonNegative(
+                availableWidth -
+                  (prefix :> .length :> Result.withDefault(0)),
+              );
+              let excerpt = postRows(post.text, textWidth);
+              let first = Draw.text(
+                Geometry.rect(
+                  textX,
+                  area.y + cursor.row,
+                  availableWidth,
+                  1,
+                ),
+                prefix ++ name ++ "  @" ++ post.author.handle,
+                Draw.accent,
+              );
+              let body = if (cursor.row + 1 >= area.height) {
+                ""
+              } else {
+                Draw.text(
+                  Geometry.rect(
+                    textX,
+                    area.y + cursor.row + 1,
+                  availableWidth,
+                  1,
+                ),
+                  "  " ++ excerpt.first,
+                  Draw.plain,
+                )
+              };
+              let avatarOutput = match(avatar) {
+                None => { "" },
+                Some(image) => {
+                  Kitty.renderWithId(
+                    cursor.imageId,
+                  Geometry.rect(
+                      avatarX,
+                      area.y + cursor.row,
+                      avatarColumns,
+                      avatarRows,
+                    ),
+                    size,
+                    Kitty.Fill,
+                    image,
+                  )
+                },
+              };
+              let nextRow = Geometry.clamp(
+                cursor.row,
+                area.height,
+                cursor.row + 2,
+              );
+              let nested = renderReplies(
+                area,
+                size,
+                children,
+                ReplyCursor(cursor.depth + 1, nextRow, cursor.imageId + 1),
+              );
+              let rest = renderReplies(
+                area,
+                size,
+                tail,
+                ReplyCursor(
+                  cursor.depth,
+                  nested.nextRow,
+                  nested.nextImageId,
+                ),
+              );
+              ReplyRender(
+                avatarOutput ++ first ++ body ++ nested.output ++ rest.output,
+                rest.nextRow,
+                rest.nextImageId,
+              )
+            },
+            UiMissingPost(_) => {
+              let current = Draw.text(
+                Geometry.rect(
+                  area.x,
+                  area.y + cursor.row,
+                  area.width,
+                  1,
+                ),
+                indentation(cursor.depth) ++ "↳ [missing reply]",
+                Draw.muted,
+              );
+              let rest = renderReplies(
+                area,
+                size,
+                tail,
+                ReplyCursor(
+                  cursor.depth,
+                  cursor.row + 1,
+                  cursor.imageId,
+                ),
+              );
+              ReplyRender(
+                current ++ rest.output,
+                rest.nextRow,
+                rest.nextImageId,
+              )
+            },
+            UiBlockedPost(_) => {
+              let current = Draw.text(
+                Geometry.rect(
+                  area.x,
+                  area.y + cursor.row,
+                  area.width,
+                  1,
+                ),
+                indentation(cursor.depth) ++ "↳ [blocked reply]",
+                Draw.muted,
+              );
+              let rest = renderReplies(
+                area,
+                size,
+                tail,
+                ReplyCursor(
+                  cursor.depth,
+                  cursor.row + 1,
+                  cursor.imageId,
+                ),
+              );
+              ReplyRender(
+                current ++ rest.output,
+                rest.nextRow,
+                rest.nextImageId,
+              )
+            },
+            UiUnknownThread(typeName) => {
+              let current = Draw.text(
+                Geometry.rect(
+                  area.x,
+                  area.y + cursor.row,
+                  area.width,
+                  1,
+                ),
+                indentation(cursor.depth) ++ "↳ [unknown] " ++ typeName,
+                Draw.muted,
+              );
+              let rest = renderReplies(
+                area,
+                size,
+                tail,
+                ReplyCursor(
+                  cursor.depth,
+                  cursor.row + 1,
+                  cursor.imageId,
+                ),
+              );
+              ReplyRender(
+                current ++ rest.output,
+                rest.nextRow,
+                rest.nextImageId,
+              )
+            },
+          }
+        },
+      }
+    }
+  },
+};
+
+let renderThreadStatus = (area, thread, size) => {
+  match(thread) {
+    ThreadLoading(_) => {
+      Draw.text(area, "loading replies…", Draw.muted)
+    },
+    ThreadFailed(_, message) => {
+      Draw.text(area, "replies unavailable: " ++ message, Draw.muted)
+    },
+    ThreadReady(_, node) => {
+      match(node) {
+        UiThreadPost(_rootPost, _rootAvatar, replies) => {
+          match(replies) {
+            [] => { Draw.text(area, "no replies", Draw.muted) },
+            _ => {
+              let rendered = renderReplies(
+                area,
+                size,
+                replies,
+                ReplyCursor(0, 0, 2001),
+              );
+              rendered.output
+            },
+          }
+        },
+        UiMissingPost(_) => {
+          Draw.text(area, "post is unavailable", Draw.muted)
+        },
+        UiBlockedPost(_) => {
+          Draw.text(area, "post is blocked", Draw.muted)
+        },
+        UiUnknownThread(typeName) => {
+          Draw.text(area, "unknown thread variant: " ++ typeName, Draw.muted)
+        },
+      }
+    },
+  }
+};
+
+let renderThreadPane = (area, state: UiState, size: Geometry.Size) => {
+  let inner = Geometry.inset(area, 1);
+  let frame = Draw.box(area, "post + replies", false);
+  match(atIndex(postsFor(state.feeds, state.view), state.selected)) {
+    None => {
+      frame ++ Draw.text(inner, "no selected post", Draw.muted)
+    },
+    Some(item) => {
+      let avatarRows = 2;
+      let avatarColumns = match(item.avatar) {
+        Some(_) => { Kitty.squareColumns(avatarRows, size) },
+        None => { 0 },
+      };
+      let contentX = inner.x + avatarColumns +
+        (if (avatarColumns > 0) { 1 } else { 0 });
+      let contentWidth = Geometry.nonNegative(
+        inner.width - avatarColumns -
+          (if (avatarColumns > 0) { 1 } else { 0 }),
+      );
+      let lines = wrapLines(
+        item.post.text,
+        contentWidth,
+        Geometry.clamp(1, 6, inner.height - 5),
+      );
+      let textRows = length(lines);
+      let mediaRow = 1 + textRows;
+      let availableImageRows = Geometry.clamp(
+        0,
+        14,
+        inner.height - mediaRow - 5,
+      );
+      let mediaRows = imageRows(
+        inner.width,
+        availableImageRows,
+        size,
+        state.imageScale,
+        item,
+      );
+      let metricsRow = mediaRow + mediaRows;
+      let repliesRow = metricsRow + 2;
+      let mediaOutput = match(item.image) {
+        None => { "" },
+        Some(image) => {
+          if (mediaRows <= 0) {
+            ""
+          } else {
+            Kitty.renderWithId(
+              1,
+              Geometry.rect(
+                inner.x,
+                inner.y + mediaRow,
+                inner.width,
+                mediaRows,
+              ),
+              size,
+              state.imageScale,
+              image,
+            )
+          }
+        },
+      };
+      let avatarOutput = match(item.avatar) {
+        None => { "" },
+        Some(image) => {
+          Kitty.renderWithId(
+            2000,
+            Geometry.rect(
+              inner.x,
+              inner.y,
+              avatarColumns,
+              avatarRows,
+            ),
+            size,
+            Kitty.Fill,
+            image,
+          )
+        },
+      };
+      frame ++
+        avatarOutput ++
+        Draw.text(
+          Geometry.rect(contentX, inner.y, contentWidth, 1),
+          item.post.authorName ++ "  @" ++ item.post.authorHandle,
+          Draw.accent,
+        ) ++
+        Draw.lines(
+          Geometry.rect(
+            contentX,
+            inner.y + 1,
+            contentWidth,
+            textRows,
+          ),
+          lines,
+          Draw.plain,
+        ) ++
+        Draw.text(
+          Geometry.rect(
+            contentX,
+            inner.y + metricsRow,
+            contentWidth,
+            1,
+          ),
+          metrics(item.post) ++ "   " ++ item.post.createdAt,
+          Draw.muted,
+        ) ++
+        mediaOutput ++
+        Draw.text(
+          Geometry.rect(
+            inner.x,
+            inner.y + repliesRow - 1,
+            inner.width,
+            1,
+          ),
+          "replies",
+          Draw.accent,
+        ) ++
+        renderThreadStatus(
+          Geometry.rect(
+            inner.x,
+            inner.y + repliesRow,
+            inner.width,
+            Geometry.nonNegative(inner.height - repliesRow),
+          ),
+          state.thread,
+          size,
+        )
+    },
+  }
+};
+
+let rec deleteThreadImages = (identifier, remaining) => {
+  if (remaining <= 0) {
+    ""
+  } else {
+    Kitty.deleteImage(identifier) ++
+      deleteThreadImages(identifier + 1, remaining - 1)
+  }
+};
+
+let renderFooter = (state: UiState, size: Geometry.Size) => {
+  let feeds = state.feeds;
+  let posts = postsFor(feeds, state.view);
+  let (_, footer) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let activity = if (state.loading) {
+    "   loading…"
+  } else {
+    if (state.status == "") { "" } else { "   " ++ state.status }
+  };
+  let graph = graphCounts(state.threadGraph);
+  let background = if (graph.pending > 0) {
+    "   bg " ++ Result.textOf(graph.ready) ++
+      "+" ++ Result.textOf(graph.pending)
+  } else {
+    ""
+  };
+  Draw.fill(footer, " ", Draw.status) ++
+    Draw.text(
+      footer,
+      " " ++ titleFor(feeds, state.view) ++ "   " ++
+        Result.textOf(state.selected + 1) ++ "/" ++ Result.textOf(length(posts)) ++
+        activity ++ background ++
+        "   t timeline   m my posts   f fit/fill   ↑/↓ j/k move   q quit ",
+      Draw.status,
+    )
+};
+
+let rec renderBorderAt = match(area, posts, request) => {
+  (_, [], _) => { "" },
+  (_, _, _) => {
+    match(posts) {
+      [] => { "" },
+      [item, ..tail] => {
+        let height = cardHeight(
+          area.width,
+          request.layout.size,
+          request.layout.scale,
+          item,
+        );
+        if (area.height < 2) {
+          ""
+        } else {
+          let visibleHeight = Geometry.clamp(2, height, area.height);
+          if (request.cursor.index == request.target) {
+            let borderArea = Geometry.rect(
+              area.x,
+              area.y,
+              area.width,
+              visibleHeight,
+            );
+            let joinedBottom = match(tail) {
+              [] => { false },
+              _ => { area.height > visibleHeight },
+            };
+            if (request.standalone) {
+              Draw.box(borderArea, "", request.active)
+            } else {
+              Draw.timelineBox(
+                borderArea,
+                request.active,
+                area.y > 0,
+                joinedBottom,
+              )
+            }
+          } else {
+            renderBorderAt(
+              Geometry.rect(
+                area.x,
+                area.y + visibleHeight - 1,
+                area.width,
+                area.height - visibleHeight + 1,
+              ),
+              tail,
+              BorderRender(
+                CardCursor(
+                  request.cursor.selected,
+                  request.cursor.index + 1,
+                ),
+                request.layout,
+                request.target,
+                request.active,
+                request.standalone,
+              ),
+            )
+          }
+        }
+      },
+    }
+  },
+};
+
+let renderFull = (state: UiState, size: Geometry.Size) => {
+  let posts = postsFor(state.feeds, state.view);
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  let start = visibleStart(
+    posts,
+    state.selected,
+    0,
+    WindowLayout(
+      split.feed.width,
+      split.feed.height,
+      size,
+      state.imageScale,
+    ),
+  );
+  let visible = dropItems(posts, start);
+  let cursor = CardCursor(state.selected, start);
+  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
+    renderCards(split.feed, visible, start, layout) ++
+    renderBorderAt(
+      split.feed,
+      visible,
+      BorderRender(cursor, layout, state.selected, true, true),
+    ) ++
+    renderThreadPane(split.thread, state, size) ++
+    renderFooter(state, size) ++
+    Draw.endFrame ++ Ansi.endSynchronizedUpdate
+};
+
+let renderSelectionOutline = (
+  state: UiState,
+  size: Geometry.Size,
+  start,
+  target,
+  active,
+  standalone,
+) => {
+  let posts = postsFor(state.feeds, state.view);
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  let visible = dropItems(posts, start);
+  let cursor = CardCursor(state.selected, start);
+  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  renderBorderAt(
+    split.feed,
+    visible,
+    BorderRender(cursor, layout, target, active, standalone),
+  )
+};
+
+let renderThreadRegion = (state: UiState, size: Geometry.Size) => {
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  Kitty.deleteImage(1) ++
+    deleteThreadImages(2000, size.height + 1) ++
+    Draw.fill(split.thread, " ", Draw.plain) ++
+    renderThreadPane(split.thread, state, size)
+};
+
+let threadKey = match(thread) => {
+  ThreadLoading(uri) => { "loading:" ++ uri },
+  ThreadReady(uri, _) => { "ready:" ++ uri },
+  ThreadFailed(uri, message) => { "failed:" ++ uri ++ ":" ++ message },
+};
+
+let feedRegion = (model: RenderModel) => {
+  FeedRegion(
+    model.state.renderVersion,
+    model.start,
+    model.size,
+  )
+};
+
+let selectionRegion = (model: RenderModel) => {
+  SelectionRegion(model.state.selected, model.start)
+};
+
+let threadRegion = (model: RenderModel) => {
+  ThreadRegion(
+    model.state.selected,
+    model.state.renderVersion,
+    model.state.imageScale,
+    threadKey(model.state.thread),
+    model.size,
+  )
+};
+
+let footerRegion = (model: RenderModel) => {
+  let graph = graphCounts(model.state.threadGraph);
+  FooterRegion(
+    model.state.selected,
+    length(postsFor(model.state.feeds, model.state.view)),
+    model.state.view,
+    model.state.loading,
+    model.state.status,
+    graph.ready,
+    graph.pending,
+    model.size,
+  )
+};
+
+let sameSize = (left: Geometry.Size, right: Geometry.Size) => {
+  left.width <= right.width && left.width >= right.width &&
+    left.height <= right.height && left.height >= right.height &&
+    left.cellWidth <= right.cellWidth && left.cellWidth >= right.cellWidth &&
+    left.cellHeight <= right.cellHeight && left.cellHeight >= right.cellHeight
+};
+
+let sameView = match(left, right) => {
+  (Timeline, Timeline) => { true },
+  (OwnPosts, OwnPosts) => { true },
+  _ => { false },
+};
+
+let sameScale = match(left, right) => {
+  (Kitty.Fit, Kitty.Fit) => { true },
+  (Kitty.Fill, Kitty.Fill) => { true },
+  _ => { false },
+};
+
+let sameNumber = (left: Number, right: Number) => {
+  left <= right && left >= right
+};
+
+let sameText = (left: String, right: String) => {
+  left == right
+};
+
+let sameBool = match(left, right) => {
+  (true, true) => { true },
+  (false, false) => { true },
+  _ => { false },
+};
+
+let sameFeedRegion = (left: FeedRegion, right: FeedRegion) => {
+  sameNumber(left.renderVersion, right.renderVersion) &&
+    sameNumber(left.start, right.start) &&
+    sameSize(left.size, right.size)
+};
+
+let sameSelectionRegion = (left: SelectionRegion, right: SelectionRegion) => {
+  sameNumber(left.selected, right.selected) &&
+    sameNumber(left.start, right.start)
+};
+
+let sameThreadRegion = (left: ThreadRegion, right: ThreadRegion) => {
+  sameNumber(left.selected, right.selected) &&
+    sameNumber(left.renderVersion, right.renderVersion) &&
+    sameScale(left.imageScale, right.imageScale) &&
+    sameText(left.threadKey, right.threadKey) &&
+    sameSize(left.size, right.size)
+};
+
+let sameFooterRegion = (left: FooterRegion, right: FooterRegion) => {
+  sameNumber(left.selected, right.selected) &&
+    sameNumber(left.count, right.count) &&
+    sameView(left.view, right.view) &&
+    sameBool(left.loading, right.loading) &&
+    sameText(left.status, right.status) &&
+    sameNumber(left.graphReady, right.graphReady) &&
+    sameNumber(left.graphPending, right.graphPending) &&
+    sameSize(left.size, right.size)
+};
+
+let sameRenderDependency = match(left, right) => {
+  (SelectionSurface, SelectionSurface) => { true },
+  (ThreadSurface, ThreadSurface) => { true },
+  (FooterSurface, FooterSurface) => { true },
+  _ => { false },
+};
+
+let selectionSignal = Reactive.signal(
+  SelectionSurface,
+  (model: RenderModel) => { model },
+);
+
+let threadSignal = Reactive.signal(
+  ThreadSurface,
+  (model: RenderModel) => { model },
+);
+
+let footerSignal = Reactive.signal(
+  FooterSurface,
+  (model: RenderModel) => { model },
+);
+
+let selectionEffect = Reactive.effect(
+  "selection",
+  Reactive.read(selectionSignal) :> Reactive.map((model) => {
+    let state = model.state;
+    let selected = state.selected;
+    Reactive.emit(
+      [
+        Surface.Raw(
+          renderSelectionOutline(
+            state,
+            model.size,
+            model.start,
+            selected,
+            true,
+            true,
+          ),
+        )
+      ],
+      [
+        Surface.Raw(
+          renderSelectionOutline(
+            state,
+            model.size,
+            model.start,
+            selected,
+            false,
+            false,
+          ),
+        )
+      ],
+    )
+  }),
+);
+
+let threadEffect = Reactive.effect(
+  "thread",
+  Reactive.read(threadSignal) :> Reactive.map((model) => {
+    Reactive.commands(
+      [Surface.Raw(renderThreadRegion(model.state, model.size))],
+    )
+  }),
+);
+
+let footerEffect = Reactive.effect(
+  "footer",
+  Reactive.read(footerSignal) :> Reactive.map((model) => {
+    Reactive.commands(
+      [Surface.Raw(renderFooter(model.state, model.size))],
+    )
+  }),
+);
+
+let renderEffects = [selectionEffect, threadEffect, footerEffect];
+
+let changedDependencies = (previous: RenderModel, next: RenderModel) => {
+  let selectionChanged = !sameSelectionRegion(
+    selectionRegion(previous),
+    selectionRegion(next),
+  );
+  let threadChanged = !sameThreadRegion(
+    threadRegion(previous),
+    threadRegion(next),
+  );
+  let footerChanged = !sameFooterRegion(
+    footerRegion(previous),
+    footerRegion(next),
+  );
+  let selectionKeys = if (selectionChanged) {
+    [SelectionSurface]
+  } else {
+    []
+  };
+  let threadKeys = if (threadChanged) {
+    [ThreadSurface]
+  } else {
+    []
+  };
+  let footerKeys = if (footerChanged) {
+    [FooterSurface]
+  } else {
+    []
+  };
+  List.append(selectionKeys, List.append(threadKeys, footerKeys))
+};
+
+let synchronized = match(commands) => {
+  [] => { [] },
+  _ => {
+    List.append(
+      [Surface.Raw(Ansi.beginSynchronizedUpdate)],
+      List.append(
+        commands,
+        [
+          Surface.Raw(Draw.endFrame),
+          Surface.Raw(Ansi.endSynchronizedUpdate)
+        ],
+      ),
+    )
+  },
+};
+
+let render = (previous, state: UiState, size: Geometry.Size) => {
+  let posts = postsFor(state.feeds, state.view);
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  let start = visibleStart(
+    posts,
+    state.selected,
+    0,
+    WindowLayout(
+      split.feed.width,
+      split.feed.height,
+      size,
+      state.imageScale,
+    ),
+  );
+  let nextModel = RenderModel(state, size, start);
+  match(previous) {
+    None => {
+      let mounted = Reactive.mount(nextModel, renderEffects);
+      Surface.frame(
+        mounted.graph,
+        size,
+        [Surface.Raw(renderFull(state, size))],
+      )
+    },
+    Some(graph) => {
+      if (!sameFeedRegion(feedRegion(graph.model), feedRegion(nextModel))) {
+        let mounted = Reactive.mount(nextModel, renderEffects);
+        Surface.frame(
+          mounted.graph,
+          size,
+          [Surface.Raw(renderFull(state, size))],
+        )
+      } else {
+        let flushed = Reactive.flush(
+          graph,
+          Reactive.Transition(
+            nextModel,
+            changedDependencies(graph.model, nextModel),
+          ),
+          sameRenderDependency,
+        );
+        Surface.frame(flushed.graph, size, synchronized(flushed.output))
+      }
+    },
+  }
+};
+
+let rec loadPosts = match(posts, remaining) => {
+  ([], _) => { Task.succeed([]) },
+  ([post, ..tail], _) => {
+    let imageTask = if (remaining <= 0) {
+      Task.succeed(None)
+    } else {
+      match(post.image) {
+        None => { Task.succeed(None) },
+        Some(source) => {
+          Kitty.load(source)
+            :> Task.map(Some)
+            :> Task.recover((_) => { None })
+        },
+      }
+    };
+    let nextRemaining = match(post.image) {
+      Some(_) => {
+        if (remaining <= 0) { 0 } else { remaining - 1 }
+      },
+      None => { remaining },
+    };
+    let avatarTask = match(post.avatar) {
+      None => { Task.succeed(None) },
+      Some(url) => {
+        Kitty.loadAvatar(url)
+          :> Task.map(Some)
+          :> Task.recover((_) => { None })
+      },
+    };
+    Task|
+      imageTask,
+      avatarTask,
+      loadPosts(tail, nextRemaining)
+    | :> Task.map((image, avatar, loadedTail) => {
+      [UiPost(post, image, avatar), ..loadedTail]
+    })
+  },
+};
+
+let loadUiFeeds = (feeds: AppFeeds) => {
+  Task|
+    loadPosts(feeds.timelinePosts, 3),
+    loadPosts(feeds.ownPosts, 3)
+  | :> Task.map((timelinePosts, ownPosts) => {
+    UiFeeds(
+      feeds.handle,
+      feeds.did,
+      feeds.accessJwt,
+      timelinePosts,
+      ownPosts,
+      feeds.timelineCursor,
+      feeds.ownCursor,
+    )
+  })
+};
+
+let apiFeeds = (feeds: UiFeeds) => {
+  AppFeeds(
+    feeds.handle,
+    feeds.did,
+    feeds.accessJwt,
+    [],
+    [],
+    feeds.timelineCursor,
+    feeds.ownCursor,
+  )
+};
+
+let withThread = (state: UiState, thread, version) => {
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    version,
+    thread,
+    state.threadGraph,
+  )
+};
+
+let rec boundThreadNodes = match(nodes, remaining) => {
+  ([], _) => { BoundedThreadNodes([], remaining) },
+  (_, _) => {
+    if (remaining <= 0) {
+      BoundedThreadNodes([], 0)
+    } else {
+      match(nodes) {
+        [] => { BoundedThreadNodes([], remaining) },
+        [node, ..tail] => {
+          match(node) {
+            Views.ThreadPost(post, replies) => {
+              let boundedReplies = boundThreadNodes(replies, remaining - 1);
+              let boundedTail = boundThreadNodes(
+                tail,
+                boundedReplies.remaining,
+              );
+              BoundedThreadNodes(
+                [
+                  Views.ThreadPost(post, boundedReplies.nodes),
+                  ..boundedTail.nodes
+                ],
+                boundedTail.remaining,
+              )
+            },
+            Views.MissingPost(uri) => {
+              let boundedTail = boundThreadNodes(tail, remaining - 1);
+              BoundedThreadNodes(
+                [Views.MissingPost(uri), ..boundedTail.nodes],
+                boundedTail.remaining,
+              )
+            },
+            Views.BlockedPost(uri) => {
+              let boundedTail = boundThreadNodes(tail, remaining - 1);
+              BoundedThreadNodes(
+                [Views.BlockedPost(uri), ..boundedTail.nodes],
+                boundedTail.remaining,
+              )
+            },
+            Views.UnknownThread(typeName) => {
+              let boundedTail = boundThreadNodes(tail, remaining - 1);
+              BoundedThreadNodes(
+                [Views.UnknownThread(typeName), ..boundedTail.nodes],
+                boundedTail.remaining,
+              )
+            },
+          }
+        },
+      }
+    }
+  },
+};
+
+let rec loadUiThreadNodes = match(nodes) => {
+  [] => { Task.succeed([]) },
+  [node, ..tail] => {
+    match(node) {
+      Views.ThreadPost(post, replies) => {
+        let avatarTask = match(post.author.avatar) {
+          None => { Task.succeed(None) },
+          Some(url) => {
+            Kitty.loadAvatar(url)
+              :> Task.map(Some)
+              :> Task.recover((_) => { None })
+          },
+        };
+        Task|
+          avatarTask,
+          loadUiThreadNodes(replies),
+          loadUiThreadNodes(tail)
+        | :> Task.map((avatar, loadedReplies, loadedTail) => {
+          [
+            UiThreadPost(post, avatar, loadedReplies),
+            ..loadedTail
+          ]
+        })
+      },
+      Views.MissingPost(uri) => {
+        loadUiThreadNodes(tail) :> Task.map((loadedTail) => {
+          [UiMissingPost(uri), ..loadedTail]
+        })
+      },
+      Views.BlockedPost(uri) => {
+        loadUiThreadNodes(tail) :> Task.map((loadedTail) => {
+          [UiBlockedPost(uri), ..loadedTail]
+        })
+      },
+      Views.UnknownThread(typeName) => {
+        loadUiThreadNodes(tail) :> Task.map((loadedTail) => {
+          [UiUnknownThread(typeName), ..loadedTail]
+        })
+      },
+    }
+  },
+};
+
+let loadUiThread = (thread: Views.Thread) => {
+  let bounded = boundThreadNodes([thread], 13);
+  loadUiThreadNodes(bounded.nodes) :> Task.map((nodes) => {
+    match(nodes) {
+      [node, .._] => { node },
+      [] => { UiUnknownThread("(empty thread)") },
+    }
+  })
+};
+
+let selectedUri = (state: UiState) => {
+  atIndex(postsFor(state.feeds, state.view), state.selected)
+    :> Option.map((item) => { item.post.uri })
+};
+
+let rec findThreadResource = (uri, graph) => {
+  match(graph) {
+    [] => { None },
+    [node, ..rest] => {
+      if (node.uri == uri) {
+        Some(node.resource)
+      } else {
+        findThreadResource(uri, rest)
+      }
+    },
+  }
+};
+
+let rec removeThreadNode = (uri, graph) => {
+  match(graph) {
+    [] => { [] },
+    [node, ..rest] => {
+      if (node.uri == uri) {
+        rest
+      } else {
+        [node, ..removeThreadNode(uri, rest)]
+      }
+    },
+  }
+};
+
+let putThreadNode = (uri, resource, graph) => {
+  [ThreadNode(uri, resource), ..removeThreadNode(uri, graph)]
+};
+
+let withThreadGraph = (state: UiState, graph) => {
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    graph,
+  )
+};
+
+let threadModel = match(uri, resource) => {
+  (_, ThreadPending) => { ThreadLoading(uri) },
+  (_, ThreadCached(thread)) => { ThreadReady(uri, thread) },
+  (_, ThreadCacheFailed(message)) => { ThreadFailed(uri, message) },
+};
+
+let publishThreadResource = (state: UiState, uri, resource) => {
+  let cached = withThreadGraph(
+    state,
+    putThreadNode(uri, resource, state.threadGraph),
+  );
+  if (selectedUri(cached) == Some(uri)) {
+    withThread(
+      cached,
+      threadModel(uri, resource),
+      cached.renderVersion,
+    )
+  } else {
+    cached
+  }
+};
+
+let prefetchThreadTask = (state: UiState, uri) => {
+  threadAuthenticated(state.feeds.accessJwt, uri, 2)
+    :> Task.andThen(loadUiThread)
+    :> Task.map((thread) => { ThreadCached(thread) })
+    :> Task.recover((error) => {
+      ThreadCacheFailed(describeError(error))
+    })
+    :> Task.map((resource) => {
+      (current: UiState) => {
+        publishThreadResource(current, uri, resource)
+      }
+    })
+};
+
+let uriAt = (state: UiState, index) => {
+  atIndex(postsFor(state.feeds, state.view), index)
+    :> Option.map((item) => { item.post.uri })
+};
+
+let rec presentUris = match(values) => {
+  [] => { [] },
+  [None, ..rest] => { presentUris(rest) },
+  [Some(uri), ..rest] => { [uri, ..presentUris(rest)] },
+};
+
+let frontierUris = (state: UiState) => {
+  presentUris([
+    uriAt(state, state.selected),
+    uriAt(state, state.selected + 1),
+    uriAt(state, state.selected - 1),
+    uriAt(state, state.selected + 2),
+    uriAt(state, state.selected - 2),
+  ])
+};
+
+let rec containsUri = (uri: String, uris: List<String>) => {
+  match(uris) {
+    [] => { false },
+    [candidate, ..rest] => {
+      if (uri == candidate) {
+        true
+      } else {
+        containsUri(uri, rest)
+      }
+    },
+  }
+};
+
+let rec pruneThreadGraph = match(frontier, graph) => {
+  (_, []) => { [] },
+  (_, [node, ..rest]) => {
+    let tail = pruneThreadGraph(frontier, rest);
+    match(node.resource) {
+      ThreadPending => { [node, ..tail] },
+      _ => {
+        if (containsUri(node.uri, frontier)) {
+          [node, ..tail]
+        } else {
+          tail
+        }
+      },
+    }
+  },
+};
+
+let rec planThreadPrefetchLimit = (state, uris, available) => {
+  if (available <= 0) {
+    PrefetchPlan(state, [])
+  } else {
+    match(uris) {
+      [] => { PrefetchPlan(state, []) },
+      [uri, ..rest] => {
+        match(findThreadResource(uri, state.threadGraph)) {
+          Some(_) => {
+            planThreadPrefetchLimit(state, rest, available)
+          },
+          None => {
+            let pending = withThreadGraph(
+              state,
+              putThreadNode(uri, ThreadPending, state.threadGraph),
+            );
+            let tailPlan = planThreadPrefetchLimit(
+              pending,
+              rest,
+              available - 1,
+            );
+            PrefetchPlan(
+              tailPlan.state,
+              [prefetchThreadTask(state, uri), ..tailPlan.tasks],
+            )
+          },
+        }
+      },
+    }
+  }
+};
+
+let planThreadPrefetch = (state: UiState, uris) => {
+  let counts = graphCounts(state.threadGraph);
+  planThreadPrefetchLimit(state, uris, 5 - counts.pending)
+};
+
+let prepareSelectedThread = (state: UiState) => {
+  match(selectedUri(state)) {
+    None => { state },
+    Some(uri) => {
+      match(findThreadResource(uri, state.threadGraph)) {
+        None => {
+          withThread(state, ThreadLoading(uri), state.renderVersion)
+        },
+        Some(resource) => {
+          withThread(
+            state,
+            threadModel(uri, resource),
+            state.renderVersion,
+          )
+        },
+      }
+    },
+  }
+};
+
+let buildPrefetchPlan = (state: UiState) => {
+  let prepared = prepareSelectedThread(state);
+  let frontier = frontierUris(prepared);
+  let bounded = withThreadGraph(
+    prepared,
+    pruneThreadGraph(frontier, prepared.threadGraph),
+  );
+  planThreadPrefetch(bounded, frontier)
+};
+
+let scheduleThreadPrefetch = (state: UiState) => {
+  let plan = buildPrefetchPlan(state);
+  match(plan.tasks) {
+    [] => { Runtime.Continue(plan.state) },
+    _ => { Runtime.SpawnMany(plan.state, plan.tasks) },
+  }
+};
+
+let loadSelectedThread = (state: UiState) => {
+  scheduleThreadPrefetch(state)
+};
+
+let loadedState = match(state, requestedView, page, posts) => {
+  (_, _, _, _) => {
+    let feeds = match(requestedView) {
+      Timeline => {
+        UiFeeds(
+          state.feeds.handle,
+          state.feeds.did,
+          state.feeds.accessJwt,
+          List.append(state.feeds.timelinePosts, posts),
+          state.feeds.ownPosts,
+          page.cursor,
+          state.feeds.ownCursor,
+        )
+      },
+      OwnPosts => {
+        UiFeeds(
+          state.feeds.handle,
+          state.feeds.did,
+          state.feeds.accessJwt,
+          state.feeds.timelinePosts,
+          List.append(state.feeds.ownPosts, posts),
+          state.feeds.timelineCursor,
+          page.cursor,
+        )
+      },
+    };
+    let status = if (state.view == requestedView) {
+      if (length(posts) > 0) { "" } else { "end of feed" }
+    } else {
+      state.status
+    };
+    UiState(
+      state.selected,
+      state.view,
+      state.imageScale,
+      feeds,
+      false,
+      status,
+      state.renderVersion + 1,
+      state.thread,
+      state.threadGraph,
+    )
+  },
+};
+
+let loadNextPage = (state: UiState) => {
+  let requestedView = state.view;
+  let request = match(state.view) {
+    Timeline => { loadMoreTimeline(apiFeeds(state.feeds), 30) },
+    OwnPosts => { loadMoreOwnPosts(apiFeeds(state.feeds), 30) },
+  };
+  let plan = buildPrefetchPlan(state);
+  let pending = UiState(
+    plan.state.selected,
+    plan.state.view,
+    plan.state.imageScale,
+    plan.state.feeds,
+    true,
+    "",
+    plan.state.renderVersion,
+    plan.state.thread,
+    plan.state.threadGraph,
+  );
+  let task = request
+    :> Task.andThen((page: FeedPage) => {
+      loadPosts(page.posts, 3) :> Task.map((posts) => {
+        (page, posts)
+      })
+    })
+    :> Task.map((loadedPage) => {
+      let (page, posts) = loadedPage;
+      (current: UiState) => {
+        loadedState(current, requestedView, page, posts)
+      }
+    })
+    :> Task.recover((error) => {
+      (current: UiState) => {
+        UiState(
+          current.selected,
+          current.view,
+          current.imageScale,
+          current.feeds,
+          false,
+          describeError(error),
+          current.renderVersion,
+          current.thread,
+          current.threadGraph,
+        )
+      }
+    });
+  Runtime.SpawnMany(pending, [task, ..plan.tasks])
+};
+
+let hasMore = match(state) => {
+  _ => {
+    match(state.view) {
+      Timeline => {
+        match(state.feeds.timelineCursor) {
+          Some(_) => { true },
+          None => { false },
+        }
+      },
+      OwnPosts => {
+        match(state.feeds.ownCursor) {
+          Some(_) => { true },
+          None => { false },
+        }
+      },
+    }
+  },
+};
+
+let moveDown = (state) => {
+  let count = length(postsFor(state.feeds, state.view));
+  let next = move(count, 1, state);
+  if (!state.loading && hasMore(state) && next.selected >= count - 3) {
+    loadNextPage(next)
+  } else {
+    if (next.selected == state.selected) {
+      Runtime.Continue(next)
+    } else {
+      loadSelectedThread(next)
+    }
+  }
+};
+
+let updateState = match(key, state) => {
+  (Event.CtrlC, _) => { Runtime.Quit },
+  (Event.Character("q"), _) => { Runtime.Quit },
+  (Event.Character("t"), _) => {
+    loadSelectedThread(
+      UiState(
+        0,
+        Timeline,
+        state.imageScale,
+        state.feeds,
+        state.loading,
+        "",
+        state.renderVersion + 1,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  (Event.Character("m"), _) => {
+    loadSelectedThread(
+      UiState(
+        0,
+        OwnPosts,
+        state.imageScale,
+        state.feeds,
+        state.loading,
+        "",
+        state.renderVersion + 1,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  (Event.Character("f"), _) => {
+    Runtime.Continue(
+      UiState(
+        state.selected,
+        state.view,
+        toggleImageScale(state.imageScale),
+        state.feeds,
+        state.loading,
+        state.status,
+        state.renderVersion + 1,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  (Event.Up, _) => {
+    let next = move(length(postsFor(state.feeds, state.view)), -1, state);
+    if (next.selected == state.selected) {
+      Runtime.Continue(next)
+    } else {
+      loadSelectedThread(next)
+    }
+  },
+  (Event.Character("k"), _) => {
+    let next = move(length(postsFor(state.feeds, state.view)), -1, state);
+    if (next.selected == state.selected) {
+      Runtime.Continue(next)
+    } else {
+      loadSelectedThread(next)
+    }
+  },
+  (Event.Down, _) => { moveDown(state) },
+  (Event.Character("j"), _) => { moveDown(state) },
+  (Event.Home, _) => {
+    loadSelectedThread(
+      UiState(
+        0,
+        state.view,
+        state.imageScale,
+        state.feeds,
+        state.loading,
+        state.status,
+        state.renderVersion,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  (Event.End, _) => {
+    loadSelectedThread(
+      UiState(
+        length(postsFor(state.feeds, state.view)) - 1,
+        state.view,
+        state.imageScale,
+        state.feeds,
+        state.loading,
+        state.status,
+        state.renderVersion,
+        state.thread,
+        state.threadGraph,
+      ),
+    )
+  },
+  _ => { Runtime.Continue(state) },
+};
+
+let startFeeds = (feeds: UiFeeds) => {
+  let initial = UiState(
+    0,
+    Timeline,
+    Kitty.Fit,
+    feeds,
+    false,
+    "",
+    0,
+    ThreadLoading(""),
+    [],
+  );
+  let plan = buildPrefetchPlan(initial);
+  let started = Runtime.runRetainedManaged(
+    plan.state,
+    plan.tasks,
+    (state: UiState) => { scheduleThreadPrefetch(state) },
+    (key, state: UiState) => { updateState(key, state) },
+    (previous, state: UiState, size: Geometry.Size) => {
+      render(previous, state, size)
+    },
+  );
+  Task.succeed(started)
+};
+
+let main = () => {
+  loadAppFeeds(30)
+    :> Task.andThen(loadUiFeeds)
+    :> Task.andThen(startFeeds)
+    :> Task.recover((error) => {
+      print("atview tui: " ++ describeError(error));
+      void
+    })
+};

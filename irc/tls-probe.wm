@@ -1,0 +1,46 @@
+-- Minimal direct-FFI probe for a certificate-verified IRC TLS connection.
+-- It registers, prints the first server chunk, and sends QUIT. It never joins
+-- a channel.
+
+from "./protocol.wm" import * as Irc;
+from js.module("node:tls") import { connect };
+
+let jsErrorText = match(error) => {
+  Js.Error(message) => { message },
+  Js.Unknown => { "unknown JavaScript error" },
+};
+
+let sendWire = (socket, wire) => {
+  match(socket.write(wire)) {
+    Ok(_) => { void },
+    Err(error) => { print("write failed: " ++ jsErrorText(error)) },
+  }
+};
+
+let main = () => {
+  match(connect(JSON{
+    host: "irc.libera.chat",
+    port: 6697,
+    servername: "irc.libera.chat",
+  })) {
+    Err(error) => {
+      print("TLS setup failed: " ++ jsErrorText(error))
+    },
+    Ok(socket) => {
+      socket.setEncoding("utf8");
+      socket.on("secureConnect", () => {
+        print("*** TLS connected");
+        sendWire(socket, Irc.nick("wmstressprobe"));
+        sendWire(socket, Irc.user("wmstressprobe", "Workman IRC client test (LLM-assisted)"))
+      });
+      socket.once("data", (chunk) => {
+        print(chunk);
+        sendWire(socket, Irc.quit("Workman TLS probe complete"))
+      });
+      socket.on("error", (error) => {
+        print("*** TLS socket error")
+      });
+      void
+    },
+  }
+};

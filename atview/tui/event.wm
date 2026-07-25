@@ -1,0 +1,230 @@
+-- Decode complete terminal input chunks into application-facing keys.
+-- Incremental CSI framing and lone-Escape timing are the next layer.
+
+from "./ansi.wm" import * as Ansi;
+from js.global("String") import {
+  fromCharCode: (Number) => String,
+};
+
+type Key =
+  | Character<String>
+  | Up
+  | Down
+  | Left
+  | Right
+  | Enter
+  | Escape
+  | Backspace
+  | Tab
+  | ShiftTab
+  | PageUp
+  | PageDown
+  | Home
+  | End
+  | CellSize<Number, Number>
+  | CtrlC
+  | Unknown<String>;
+
+let controlC = fromCharCode(3) :> Result.withDefault("");
+let carriageReturn = fromCharCode(13) :> Result.withDefault("");
+let backspace = fromCharCode(127) :> Result.withDefault("");
+
+let decode = match(raw) => {
+  "\n" => { Enter },
+  "\t" => { Tab },
+  _ => {
+    if (raw == carriageReturn) {
+      Enter
+    } else {
+      if (raw == controlC) {
+        CtrlC
+      } else {
+        if (raw == backspace) {
+          Backspace
+        } else {
+          if (raw == Ansi.esc) {
+            Escape
+          } else {
+            if (raw == Ansi.esc ++ "[A" || raw == Ansi.esc ++ "OA") {
+              Up
+            } else {
+              if (raw == Ansi.esc ++ "[B" || raw == Ansi.esc ++ "OB") {
+                Down
+              } else {
+                if (raw == Ansi.esc ++ "[C" || raw == Ansi.esc ++ "OC") {
+                  Right
+                } else {
+                  if (raw == Ansi.esc ++ "[D" || raw == Ansi.esc ++ "OD") {
+                    Left
+                  } else {
+                    if (raw == Ansi.esc ++ "[Z") {
+                      ShiftTab
+                    } else {
+                      if (raw == Ansi.esc ++ "[5~") {
+                        PageUp
+                      } else {
+                        if (raw == Ansi.esc ++ "[6~") {
+                          PageDown
+                        } else {
+                          if (raw == Ansi.esc ++ "[H" || raw == Ansi.esc ++ "[1~") {
+                            Home
+                          } else {
+                            if (raw == Ansi.esc ++ "[F" || raw == Ansi.esc ++ "[4~") {
+                              End
+                            } else {
+                              match(raw :> .length) {
+                                Ok(1) => { Character(raw) },
+                                _ => { Unknown(raw) },
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+};
+
+let starts = (text, prefix) => {
+  text :> .startsWith(prefix) :> Result.withDefault(false)
+};
+
+let drop = (text, count) => {
+  text :> .slice(count) :> Result.withDefault("")
+};
+
+let first = (text) => {
+  text :> .slice(0, 1) :> Result.withDefault("")
+};
+
+let digit = match(character) => {
+  "0" => { Some(0) },
+  "1" => { Some(1) },
+  "2" => { Some(2) },
+  "3" => { Some(3) },
+  "4" => { Some(4) },
+  "5" => { Some(5) },
+  "6" => { Some(6) },
+  "7" => { Some(7) },
+  "8" => { Some(8) },
+  "9" => { Some(9) },
+  _ => { None },
+};
+
+let rec parseDigits = (text, value) => {
+  if (text == "") {
+    Some(value)
+  } else {
+    match(digit(first(text))) {
+      None => { None },
+      Some(next) => { parseDigits(drop(text, 1), value * 10 + next) },
+    }
+  }
+};
+
+let positiveNumber = (text) => {
+  if (text == "") {
+    None
+  } else {
+    parseDigits(text, 0) :> Option.andThen((value) => {
+      if (value > 0) { Some(value) } else { None }
+    })
+  }
+};
+
+let cellSizeReport = (raw) => {
+  let end = raw :> .indexOf("t") :> Result.withDefault(-1);
+  if (!starts(raw, Ansi.esc ++ "[6;") || end < 0) {
+    None
+  } else {
+    let payload = raw :> .slice(4, end) :> Result.withDefault("");
+    match(payload :> .split(";")) {
+      Err(_) => { None },
+      Ok(parts) => {
+        match(Js.Array.toList(parts)) {
+          [heightText, widthText] => {
+            match((positiveNumber(widthText), positiveNumber(heightText))) {
+              (Some(width), Some(height)) => {
+                Some((CellSize(width, height), drop(raw, end + 1)))
+              },
+              _ => { None },
+            }
+          },
+          _ => { None },
+        }
+      },
+    }
+  }
+};
+
+-- One stream read may contain several keys. Consume known multi-byte terminal
+-- sequences first, then consume one ordinary character. This deliberately
+-- leaves incomplete-CSI buffering and Unicode grapheme segmentation visible as
+-- separate future work instead of hiding either behind a host shim.
+let rec decodeMany = (raw) => {
+  if (raw == "") {
+    []
+  } else {
+    match(cellSizeReport(raw)) {
+      Some(found) => {
+        let (report, rest) = found;
+        [report, ..decodeMany(rest)]
+      },
+      None => {
+        if (starts(raw, Ansi.esc ++ "[A") || starts(raw, Ansi.esc ++ "OA")) {
+      [Up, ..decodeMany(drop(raw, 3))]
+    } else {
+      if (starts(raw, Ansi.esc ++ "[B") || starts(raw, Ansi.esc ++ "OB")) {
+        [Down, ..decodeMany(drop(raw, 3))]
+      } else {
+        if (starts(raw, Ansi.esc ++ "[C") || starts(raw, Ansi.esc ++ "OC")) {
+          [Right, ..decodeMany(drop(raw, 3))]
+        } else {
+          if (starts(raw, Ansi.esc ++ "[D") || starts(raw, Ansi.esc ++ "OD")) {
+            [Left, ..decodeMany(drop(raw, 3))]
+          } else {
+            if (starts(raw, Ansi.esc ++ "[Z")) {
+              [ShiftTab, ..decodeMany(drop(raw, 3))]
+            } else {
+              if (starts(raw, Ansi.esc ++ "[5~")) {
+                [PageUp, ..decodeMany(drop(raw, 4))]
+              } else {
+                if (starts(raw, Ansi.esc ++ "[6~")) {
+                  [PageDown, ..decodeMany(drop(raw, 4))]
+                } else {
+                  if (starts(raw, Ansi.esc ++ "[H")) {
+                    [Home, ..decodeMany(drop(raw, 3))]
+                  } else {
+                    if (starts(raw, Ansi.esc ++ "[1~")) {
+                      [Home, ..decodeMany(drop(raw, 4))]
+                    } else {
+                      if (starts(raw, Ansi.esc ++ "[F")) {
+                        [End, ..decodeMany(drop(raw, 3))]
+                      } else {
+                        if (starts(raw, Ansi.esc ++ "[4~")) {
+                          [End, ..decodeMany(drop(raw, 4))]
+                        } else {
+                          let character = first(raw);
+                          [decode(character), ..decodeMany(drop(raw, 1))]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+      },
+    }
+  }
+};

@@ -1,0 +1,33 @@
+-- Lower-level terminal probe using process.stdin's data event directly.
+
+from js.module("node:tty") import type { ReadStream };
+from js.global("process") import {
+  stdin: ReadStream,
+};
+from js.global import {
+  String as toString: (Js.Value) => String,
+};
+
+let main = () => {
+  match(stdin) {
+    Err(_) => {
+      print("stdin unavailable")
+    },
+    Ok(input) => {
+      match(input.on("data", (chunk) => {
+        match(toString(chunk)) {
+          Ok(text) => { print("data: " ++ text) },
+          Err(_) => { print("could not decode input") },
+        }
+      })) {
+        Ok(_) => { print("stdin listener registered") },
+        Err(error) => {
+          match(error) {
+            Js.Error(text) => { print("stdin listener error: " ++ text) },
+            Js.Unknown => { print("unknown stdin listener error") },
+          }
+        },
+      }
+    },
+  }
+};

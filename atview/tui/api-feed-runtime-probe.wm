@@ -1,0 +1,36 @@
+-- Reduction for whether Api.OwnFeed itself, rather than loadOwnFeed's Task,
+-- conflicts with a generic runtime closure.
+
+from "../api.wm" import { OwnFeed };
+from "./draw.wm" import * as Draw;
+from "./event.wm" import * as Event;
+from "./geometry.wm" import * as Geometry;
+from "./runtime.wm" import * as Runtime;
+
+record FeedState = {
+  selected: Number,
+};
+
+let start = (feed: OwnFeed) => {
+  Runtime.run(
+    FeedState(0),
+    (key, state: FeedState) => {
+      match(key) {
+        Event.Character("q") => { Runtime.Quit },
+        Event.CtrlC => { Runtime.Quit },
+        _ => { Runtime.Continue(state) },
+      }
+    },
+    (_, state: FeedState, size: Geometry.Size) => {
+      Draw.beginFrame ++ Draw.text(
+        Geometry.rect(0, 0, size.width, 1),
+        feed.handle ++ " " ++ Result.textOf(state.selected),
+        Draw.plain,
+      )
+    },
+  )
+};
+
+let main = () => {
+  start(OwnFeed("probe.test", "did:example:probe", []))
+};

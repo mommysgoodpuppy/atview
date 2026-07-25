@@ -1,0 +1,26 @@
+-- Minimal direct-FFI probe: can Workman reflect node:net well enough to create
+-- an evented TCP socket without a JavaScript or TypeScript shim?
+
+from js.module("node:net") import { createConnection };
+
+let main = () => {
+  let socketResult = createConnection(JSON{
+    host: "127.0.0.1",
+    port: 9,
+  });
+  match(socketResult) {
+    Ok(socket) => {
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        print(chunk)
+      });
+      socket.on("error", (_) => {
+        print("socket error")
+      });
+      void
+    },
+    Err(_) => {
+      print("createConnection threw")
+    },
+  }
+};

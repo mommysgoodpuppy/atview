@@ -1,0 +1,60 @@
+from "./protocol.wm" import * as Irc;
+
+let assertTrue = (name, condition) => {
+  if (condition) {
+    print("ok - " ++ name)
+  } else {
+    print("not ok - " ++ name);
+    Panic("protocol assertion failed")
+  }
+};
+
+let requireParsed = (line) => {
+  match(Irc.parse(line)) {
+    Ok(message) => { message },
+    Err(error) => {
+      match(error) {
+        Js.Error(text) => { print(text) },
+        Js.Unknown => { print("unknown JavaScript error") },
+      };
+      Panic("unexpected JS error while parsing")
+    },
+  }
+};
+
+let main = () => {
+  let ping = requireParsed("PING :irc.example.test" ++ Irc.carriageReturn);
+  assertTrue("PING command", ping.command == "PING");
+  assertTrue("PING token", ping.params == ["irc.example.test"]);
+  assertTrue("PING has no prefix", ping.prefix == None);
+
+  let welcome = requireParsed(":server.example 001 workman :Welcome to IRC");
+  assertTrue("numeric command", welcome.command == "001");
+  assertTrue("server prefix", welcome.prefix == Some("server.example"));
+  assertTrue("middle and trailing params", welcome.params == ["workman", "Welcome to IRC"]);
+
+  let message = requireParsed(":alice!a@example PRIVMSG #workman :hello functional world");
+  assertTrue("PRIVMSG command", message.command == "PRIVMSG");
+  assertTrue(
+    "PRIVMSG params preserve spaces",
+    message.params == ["#workman", "hello functional world"],
+  );
+
+  let notice = requireParsed("NOTICE workman :maintenance soon");
+  assertTrue("unprefixed NOTICE", notice.params == ["workman", "maintenance soon"]);
+
+  assertTrue("NICK format", Irc.nick("stone") == "NICK stone" ++ Irc.lineEnding);
+  assertTrue(
+    "USER format",
+    Irc.user("stone", "Workman IRC") == "USER stone 0 * :Workman IRC" ++ Irc.lineEnding,
+  );
+  assertTrue("JOIN format", Irc.join("#wm") == "JOIN #wm" ++ Irc.lineEnding);
+  assertTrue("PONG format", Irc.pong("server") == "PONG :server" ++ Irc.lineEnding);
+  assertTrue(
+    "PRIVMSG format",
+    Irc.privmsg("#wm", "hello") == "PRIVMSG #wm :hello" ++ Irc.lineEnding,
+  );
+  assertTrue("QUIT format", Irc.quit("done") == "QUIT :done" ++ Irc.lineEnding);
+
+  print("protocol tests complete")
+};

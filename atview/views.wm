@@ -1,0 +1,295 @@
+from "./json-boundary.wm" import * as Boundary;
+
+record ProfileCore = {
+  did: String,
+  handle: String,
+};
+
+record Profile = {
+  did: String,
+  handle: String,
+  displayName: Option<String>,
+  description: Option<String>,
+  followersCount: Option<Number>,
+  followsCount: Option<Number>,
+  postsCount: Option<Number>,
+};
+
+record ActorCore = {
+  did: String,
+  handle: String,
+};
+
+record Actor = {
+  did: String,
+  handle: String,
+  displayName: Option<String>,
+  avatar: Option<String>,
+};
+
+record PostRecord = {
+  text: String,
+  createdAt: String,
+};
+
+record PostViewWire = {
+  uri: String,
+  cid: String,
+  author: Js.Object,
+  record: Js.Object,
+  indexedAt: String,
+};
+
+record ImageViewWire = {
+  thumb: String,
+  fullsize: String,
+  alt: String,
+};
+
+record ImagesViewWire = {
+  images: Js.Array<ImageViewWire>,
+};
+
+record RecordWithMediaViewWire = {
+  media: Js.Object,
+};
+
+record PostImage = {
+  thumb: String,
+  fullsize: String,
+  alt: String,
+};
+
+record Post = {
+  uri: String,
+  cid: String,
+  author: Actor,
+  text: String,
+  createdAt: String,
+  indexedAt: String,
+  replyCount: Option<Number>,
+  repostCount: Option<Number>,
+  likeCount: Option<Number>,
+  quoteCount: Option<Number>,
+  image: Option<PostImage>,
+};
+
+record FeedItemWire = {
+  post: Js.Object,
+};
+
+record AuthorFeedWire = {
+  feed: Js.Array<FeedItemWire>,
+};
+
+record AuthorFeed = {
+  posts: List<Post>,
+  cursor: Option<String>,
+};
+
+record SearchWire = {
+  posts: Js.Array<Js.Object>,
+};
+
+record SearchResults = {
+  posts: List<Post>,
+  cursor: Option<String>,
+  hitsTotal: Option<Number>,
+};
+
+record ThreadResponseWire = {
+  thread: Js.Object,
+};
+
+record MissingPostWire = {
+  uri: String,
+  notFound: Bool,
+};
+
+record BlockedPostWire = {
+  uri: String,
+  blocked: Bool,
+};
+
+type Thread =
+  | ThreadPost<Post, List<Thread>>
+  | MissingPost<String>
+  | BlockedPost<String>
+  | UnknownThread<String>;
+
+let decodeProfile = (body) => {
+  let core: Result<ProfileCore, Js.Error> = body :> Json.assert;
+  Result|
+    core,
+    Boundary.optionalString(body, "displayName"),
+    Boundary.optionalString(body, "description"),
+    Boundary.optionalNumber(body, "followersCount"),
+    Boundary.optionalNumber(body, "followsCount"),
+    Boundary.optionalNumber(body, "postsCount")
+  | :> Result.map((core, displayName, description, followers, follows, posts) => {
+    Profile(
+      core.did,
+      core.handle,
+      displayName,
+      description,
+      followers,
+      follows,
+      posts,
+    )
+  })
+};
+
+let decodeActor = (body) => {
+  let core: Result<ActorCore, Js.Error> = body :> Json.assert;
+  Result|
+    core,
+    Boundary.optionalString(body, "displayName"),
+    Boundary.optionalString(body, "avatar")
+  | :> Result.map((core, displayName, avatar) => {
+    Actor(core.did, core.handle, displayName, avatar)
+  })
+};
+
+let decodeImagesView = (body) => {
+  let wire: Result<ImagesViewWire, Js.Error> = body :> Json.assert;
+  wire :> Result.map((view) => {
+    match(Js.Array.toList(view.images)) {
+      [] => { None },
+      [image, .._] => {
+        Some(PostImage(image.thumb, image.fullsize, image.alt))
+      },
+    }
+  })
+};
+
+let rec decodeEmbedImage = (value: Js.Object) => {
+  Boundary.optionalString(value, "$type") :> Result.andThen((typeName) => {
+    match(typeName) {
+      Some("app.bsky.embed.images#view") => {
+        decodeImagesView(value)
+      },
+      Some("app.bsky.embed.recordWithMedia#view") => {
+        let wire: Result<RecordWithMediaViewWire, Js.Error> = value :> Json.assert;
+        wire :> Result.andThen((record) => {
+          decodeEmbedImage(record.media)
+        })
+      },
+      _ => { Ok(None) },
+    }
+  })
+};
+
+let decodePostImage = (body) => {
+  Boundary.optionalObject(body, "embed") :> Result.andThen((embed) => {
+    match(embed) {
+      None => { Ok(None) },
+      Some(value) => { decodeEmbedImage(value) },
+    }
+  })
+};
+
+let decodePost = (body) => {
+  let wire: Result<PostViewWire, Js.Error> = body :> Json.assert;
+  wire :> Result.andThen((post) => {
+    let record: Result<PostRecord, Js.Error> = post.record :> Json.assert;
+    Result|
+      decodeActor(post.author),
+      record,
+      Boundary.optionalNumber(body, "replyCount"),
+      Boundary.optionalNumber(body, "repostCount"),
+      Boundary.optionalNumber(body, "likeCount"),
+      Boundary.optionalNumber(body, "quoteCount"),
+      decodePostImage(body)
+    | :> Result.map((author, record, replies, reposts, likes, quotes, image) => {
+      Post(
+        post.uri,
+        post.cid,
+        author,
+        record.text,
+        record.createdAt,
+        post.indexedAt,
+        replies,
+        reposts,
+        likes,
+        quotes,
+        image,
+      )
+    })
+  })
+};
+
+let decodePostList = (bodies) => {
+  bodies
+    :> List.map(decodePost)
+    :> Result.collectList
+};
+
+let decodeAuthorFeed = (body) => {
+  let wire: Result<AuthorFeedWire, Js.Error> = body :> Json.assert;
+  wire :> Result.andThen((feed) => {
+    let postBodies = feed.feed
+      :> Js.Array.toList
+      :> List.map((item) => { item.post });
+    Result.map2(
+      decodePostList(postBodies),
+      Boundary.optionalString(body, "cursor"),
+      AuthorFeed,
+    )
+  })
+};
+
+let decodeSearch = (body) => {
+  let wire: Result<SearchWire, Js.Error> = body :> Json.assert;
+  wire :> Result.andThen((results) => {
+    Result|
+      decodePostList(Js.Array.toList(results.posts)),
+      Boundary.optionalString(body, "cursor"),
+      Boundary.optionalNumber(body, "hitsTotal")
+    | :> Result.map(SearchResults)
+  })
+};
+
+let rec decodeThreadNode = (body) => {
+  Boundary.optionalString(body, "$type") :> Result.andThen((typeName) => {
+    match(typeName) {
+      Some("app.bsky.feed.defs#threadViewPost") => {
+        Result.map2(
+          Boundary.requiredObject(body, "post") :> Result.andThen(decodePost),
+          Boundary.optionalObjectArray(body, "replies") :> Result.andThen((replies) => {
+            match(replies) {
+              None => { Ok([]) },
+              Some(items) => {
+                items
+                  :> Js.Array.toList
+                  :> List.map(decodeThreadNode)
+                  :> Result.collectList
+              },
+            }
+          }),
+          ThreadPost,
+        )
+      },
+      Some("app.bsky.feed.defs#notFoundPost") => {
+        let missing: Result<MissingPostWire, Js.Error> = body :> Json.assert;
+        missing :> Result.map((post) => { MissingPost(post.uri) })
+      },
+      Some("app.bsky.feed.defs#blockedPost") => {
+        let blocked: Result<BlockedPostWire, Js.Error> = body :> Json.assert;
+        blocked :> Result.map((post) => { BlockedPost(post.uri) })
+      },
+      Some(other) => {
+        Ok(UnknownThread(other))
+      },
+      None => {
+        Ok(UnknownThread("(missing $type)"))
+      },
+    }
+  })
+};
+
+let decodeThread = (body) => {
+  let wire: Result<ThreadResponseWire, Js.Error> = body :> Json.assert;
+  wire :> Result.andThen((response) => {
+    decodeThreadNode(response.thread)
+  })
+};

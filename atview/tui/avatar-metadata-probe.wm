@@ -1,0 +1,27 @@
+-- Prints the first timeline avatar URL without exposing session credentials.
+
+from "../api.wm" import { AppFeeds, FeedPost, loadAppFeeds };
+from "../xrpc.wm" import { AppError };
+
+let rec firstAvatar = match(posts) => {
+  [] => { None },
+  [post, ..tail] => {
+    match(post.avatar) {
+      Some(url) => { Some(url) },
+      None => { firstAvatar(tail) },
+    }
+  },
+};
+
+let main = () => {
+  loadAppFeeds(10)
+    :> Task.map((feeds: AppFeeds) => {
+      match(firstAvatar(feeds.timelinePosts)) {
+        Some(url) => { print(url) },
+        None => { print("no avatar") },
+      }
+    })
+    :> Task.recover((_) => {
+      print("avatar probe failed")
+    })
+};

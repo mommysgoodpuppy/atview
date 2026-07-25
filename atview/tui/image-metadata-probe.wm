@@ -1,0 +1,36 @@
+-- Retained probe for the AppView image union boundary. It prints only public
+-- CDN metadata, never credentials or session tokens.
+
+from "../api.wm" import { AppFeeds, FeedPost, loadAppFeeds };
+from "../views.wm" import { PostImage };
+from "../xrpc.wm" import { AppError, describeError };
+
+let rec firstImage = match(posts) => {
+  [] => { None },
+  [post, ..tail] => {
+    match(post.image) {
+      Some(image) => { Some(image) },
+      None => { firstImage(tail) },
+    }
+  },
+};
+
+let main = () => {
+  loadAppFeeds(50)
+    :> Task.map((feeds) => {
+      match(firstImage(feeds.timelinePosts)) {
+        None => {
+          print("no image in timeline sample")
+        },
+        Some(image) => {
+          print("thumb=" ++ image.thumb);
+          print("fullsize=" ++ image.fullsize);
+          print("alt=" ++ image.alt)
+        },
+      }
+    })
+    :> Task.recover((error) => {
+      print("image metadata probe: " ++ describeError(error));
+      void
+    })
+};

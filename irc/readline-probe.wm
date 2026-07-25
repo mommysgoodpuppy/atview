@@ -1,0 +1,34 @@
+-- Minimal direct-FFI probe for interactive terminal input.
+
+from js.module("node:readline") import { createInterface };
+from js.global("process") import {
+  stdin: Js.Value,
+  stdout: Js.Value,
+};
+
+let main = () => {
+  match(Result|stdin, stdout| :> Result.andThen((input, output) => {
+    createInterface(JSON{
+      input: input,
+      output: output,
+      terminal: false,
+    })
+  })) {
+    Err(_) => {
+      print("readline setup failed")
+    },
+    Ok(lines) => {
+      match(lines.on("line", (line) => {
+        print("read: " ++ line)
+      })) {
+        Ok(_) => { print("listener registered") },
+        Err(error) => {
+          match(error) {
+            Js.Error(text) => { print("listener error: " ++ text) },
+            Js.Unknown => { print("unknown listener error") },
+          }
+        },
+      }
+    },
+  }
+};

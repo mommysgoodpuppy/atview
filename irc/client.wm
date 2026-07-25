@@ -1,0 +1,295 @@
+-- A small direct-FFI IRC client. There are deliberately no JS/TS shims.
+--
+-- Usage:
+--   wm run irc/client.wm -- [host] [port] [nick] [channel]
+--
+-- Defaults:
+--   irc.libera.chat 6697 workman #workman
+
+from "./protocol.wm" import * as Irc;
+from js.module("node:tls") import { connect as createConnection };
+from js.module("node:readline") import { createInterface };
+from js.global("Deno") import {
+  args: Js.Array<String>,
+};
+from js.global("process") import {
+  stdin: Js.Value,
+  stdout: Js.Value,
+};
+from js.global import {
+  Number as toNumber: (String) => Number,
+};
+
+record Config = {
+  host: String,
+  port: Number,
+  nick: String,
+  channel: String,
+};
+
+let jsErrorText = match(error) => {
+  Js.Error(message) => { message },
+  Js.Unknown => { "unknown JavaScript error" },
+};
+
+let argAt = (values, index, fallback) => {
+  values :> .at(index) :> Result.map((found) => {
+    match(found) {
+      Some(value) => { value },
+      None => { fallback },
+    }
+  })
+};
+
+let configFromArgs = (values) => {
+  let parsePortR = Monad.lift Result (portText) => {
+    toNumber(portText)
+  };
+  let port = argAt(values, 1, "6697") :> parsePortR;
+
+  Result|
+    argAt(values, 0, "irc.libera.chat"),
+    port,
+    argAt(values, 2, "workman"),
+    argAt(values, 3, "#workman")
+  | :> Result.map(Config)
+};
+
+let sendWire = (socket, wire) => {
+  match(socket.write(wire)) {
+    Ok(_) => { void },
+    Err(error) => {
+      print("write failed: " ++ jsErrorText(error))
+    },
+  }
+};
+
+let displayMessage = (message) => {
+  match(message.command) {
+    "001" => {
+      print("*** connected")
+    },
+    "PRIVMSG" => {
+      let source = match(message.prefix) {
+        Some(prefix) => { prefix },
+        None => { "?" },
+      };
+      let target = match(Irc.firstParam(message)) {
+        Some(value) => { value },
+        None => { "?" },
+      };
+      let text = match(Irc.secondParam(message)) {
+        Some(value) => { value },
+        None => { "" },
+      };
+      print("[" ++ target ++ "] <" ++ source ++ "> " ++ text)
+    },
+    "NOTICE" => {
+      let text = match(Irc.secondParam(message)) {
+        Some(value) => { value },
+        None => { "" },
+      };
+      print("-notice- " ++ text)
+    },
+    "ERROR" => {
+      let text = match(Irc.firstParam(message)) {
+        Some(value) => { value },
+        None => { "server error" },
+      };
+      print("*** ERROR: " ++ text)
+    },
+    _ => {
+      print("<<< " ++ message.command ++ " " ++ Irc.joinParams(message.params))
+    },
+  }
+};
+
+let handleLine = (socket, config, line) => {
+  match(Irc.parse(line)) {
+    Err(error) => {
+      print("parse failed: " ++ jsErrorText(error))
+    },
+    Ok(message) => {
+      if (message.command == "PING") {
+        match(Irc.firstParam(message)) {
+          Some(token) => {
+            print(">>> PONG");
+            sendWire(socket, Irc.pong(token))
+          },
+          None => {
+            print("*** malformed PING")
+          },
+        }
+      } else {
+        if (message.command == "001") {
+          displayMessage(message);
+          print("*** registered; use /join <channel> when you choose")
+        } else {
+          displayMessage(message)
+        }
+      }
+    },
+  }
+};
+
+let rec processLines = match(socket, config, lines) => {
+  (_, _, []) => { void },
+  (_, _, [line, ..rest]) => {
+    handleLine(socket, config, line);
+    processLines(socket, config, rest)
+  },
+};
+
+-- Separate a non-empty list into every item except the last and the last item.
+let rec unsnoc = match(parts) => {
+  [] => { ([], "") },
+  [only] => { ([], only) },
+  [head, ..tail] => {
+    let (initial, last) = unsnoc(tail);
+    ([head, ..initial], last)
+  },
+};
+
+-- `once` plus a recursive closure carries the incomplete final line into the
+-- next callback. This avoids mutation while still handling arbitrary TCP chunk
+-- boundaries correctly.
+let rec listen = (socket, config, buffered) => {
+  socket.once("data", (chunk) => {
+    let combined = buffered ++ chunk;
+    match(combined.split("\n")) {
+      Err(error) => {
+        print("line framing failed: " ++ jsErrorText(error))
+      },
+      Ok(partsArray) => {
+        let (complete, remainder) = unsnoc(Js.Array.toList(partsArray));
+        processLines(socket, config, complete);
+        listen(socket, config, remainder)
+      },
+    }
+  });
+  void
+};
+
+let handleInput = (lines, socket, config, line) => {
+  if (line == "/quit") {
+    sendWire(socket, Irc.quit("leaving"));
+    lines.close();
+    void
+  } else {
+    match(line.startsWith("/join ")) {
+      Err(error) => {
+        print("input failed: " ++ jsErrorText(error))
+      },
+      Ok(true) => {
+        match(line.slice(6)) {
+          Err(error) => { print("input failed: " ++ jsErrorText(error)) },
+          Ok(channel) => { sendWire(socket, Irc.join(channel)) },
+        }
+      },
+      Ok(false) => {
+        match(line.startsWith("/msg ")) {
+          Err(error) => {
+            print("input failed: " ++ jsErrorText(error))
+          },
+          Ok(true) => {
+            match(line.slice(5) :> Result.andThen((rest) => {
+              Irc.splitFirst(rest, " ", 1)
+            })) {
+              Err(error) => {
+                print("input failed: " ++ jsErrorText(error))
+              },
+              Ok((Var(target), Some(Var(text)))) => {
+                sendWire(socket, Irc.privmsg(target, text))
+              },
+              Ok((_, None)) => {
+                print("usage: /msg <target> <text>")
+              },
+            }
+          },
+          Ok(false) => {
+            match(line.startsWith("/")) {
+              Err(error) => {
+                print("input failed: " ++ jsErrorText(error))
+              },
+              Ok(true) => {
+                print("commands: /join <channel>, /msg <target> <text>, /quit")
+              },
+              Ok(false) => {
+                sendWire(socket, Irc.privmsg(config.channel, line))
+              },
+            }
+          },
+        }
+      },
+    }
+  }
+};
+
+let startInput = (socket, config) => {
+  match(Result|stdin, stdout| :> Result.andThen((input, output) => {
+    createInterface(JSON{
+      input: input,
+      output: output,
+      terminal: true,
+    })
+  })) {
+    Err(error) => {
+      print("terminal input unavailable: " ++ jsErrorText(error))
+    },
+    Ok(lines) => {
+      print("*** type a message, /join, /msg, or /quit");
+      lines.on("line", (line) => {
+        handleInput(lines, socket, config, line)
+      });
+      void
+    },
+  }
+};
+
+let start = (config) => {
+  print("*** connecting with TLS to " ++ config.host);
+  match(createConnection(JSON{
+    host: config.host,
+    port: config.port,
+    servername: config.host,
+  })) {
+    Err(error) => {
+      print("connection setup failed: " ++ jsErrorText(error))
+    },
+    Ok(socket) => {
+      socket.setEncoding("utf8");
+      socket.on("secureConnect", () => {
+        print("*** TLS connected; registering as " ++ config.nick);
+        sendWire(socket, Irc.nick(config.nick));
+        sendWire(socket, Irc.user(config.nick, "Workman IRC client"));
+        startInput(socket, config)
+      });
+      socket.on("error", (error) => {
+        print("*** socket error")
+      });
+      socket.on("end", () => {
+        print("*** server closed the connection")
+      });
+      listen(socket, config, "");
+      void
+    },
+  }
+};
+
+let main = () => {
+  match(args) {
+    Err(error) => {
+      print("could not read command line: " ++ jsErrorText(error))
+    },
+    Ok(values) => {
+      match(configFromArgs(values)) {
+        Err(error) => {
+          print("invalid command line: " ++ jsErrorText(error))
+        },
+        Ok(config) => {
+          start(config)
+        },
+      }
+    },
+  }
+};

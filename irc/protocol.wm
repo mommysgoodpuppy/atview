@@ -1,0 +1,169 @@
+-- IRC wire protocol parsing and formatting.
+--
+-- Receiver calls on String cross Workman's safe JS boundary, so parsing
+-- explicitly returns Result<Message, Js.Error> even though the algorithm itself
+-- is deterministic.
+
+from js.global("String") import unsafe {
+  fromCharCode: (Number) => String
+};
+
+record Message = {
+  prefix: Option<String>,
+  command: String,
+  params: List<String>,
+};
+
+let carriageReturn = fromCharCode(13);
+let lineEnding = carriageReturn ++ "\n";
+
+let rec append = match(left, right) => {
+  ([], _) => { right },
+  ([head, ..tail], _) => { [head, ..append(tail, right)] },
+};
+
+let splitWords = (text) => {
+  text
+    :> .split(" ")
+    :> Result.map((parts) => {
+      parts
+        :> Js.Array.toList
+        :> List.filter((part) => { part != "" })
+    })
+};
+
+-- Split on the first occurrence of a delimiter. The delimiter itself is
+-- omitted from both returned strings.
+let splitFirst = (text, delimiter, delimiterWidth) => {
+  text :> .indexOf(delimiter) :> Result.andThen((index) => {
+    if (index < 0) {
+      Ok((text, None))
+    } else {
+      Result.map2(
+        text :> .slice(0, index),
+        text :> .slice(index + delimiterWidth),
+        (before, after) => { (before, Some(after)) },
+      )
+    }
+  })
+};
+
+let stripLineEnding = (line) => {
+  line :> .endsWith(carriageReturn) :> Result.andThen((hasCarriageReturn) => {
+    if (hasCarriageReturn) {
+      line :> .slice(0, -1)
+    } else {
+      Ok(line)
+    }
+  })
+};
+
+let peelPrefix = (line) => {
+  line :> .startsWith(":") :> Result.andThen((hasPrefix) => {
+    if (hasPrefix) {
+      line :> .indexOf(" ") :> Result.andThen((space) => {
+        if (space < 0) {
+          Ok((None, line))
+        } else {
+          Result.map2(
+            line :> .slice(1, space),
+            line :> .slice(space + 1),
+            (prefix, rest) => { (Some(prefix), rest) },
+          )
+        }
+      })
+    } else {
+      Ok((None, line))
+    }
+  })
+};
+
+let parse = (wireLine) => {
+  let stripLineEndingR = Monad.lift Result (line) => {
+    stripLineEnding(line)
+  };
+  let peelPrefixR = Monad.lift Result (line) => {
+    peelPrefix(line)
+  };
+  let splitTrailingR = Monad.lift Result (prefix, withoutPrefix) => {
+    splitFirst(withoutPrefix, " :", 2) :> Result.map((middle, trailing) => {
+      (prefix, middle, trailing)
+    })
+  };
+  let splitWordsR = Monad.lift Result (prefix, middle, trailing) => {
+    splitWords(middle) :> Result.map((words) => {
+      (prefix, words, trailing)
+    })
+  };
+  let buildMessageR = Monad.lift Result (prefix, words, trailing) => {
+    match(words) {
+      [] => {
+        Ok(.{ prefix = prefix, command = "", params = [] })
+      },
+      [command, ..middleParams] => {
+        let params = match(trailing) {
+          None => { middleParams },
+          Some(last) => { append(middleParams, [last]) },
+        };
+        Ok(.{ prefix = prefix, command = command, params = params })
+      },
+    }
+  };
+
+  Ok(wireLine)
+    :> stripLineEndingR
+    :> peelPrefixR
+    :> splitTrailingR
+    :> splitWordsR
+    :> buildMessageR
+};
+
+let rec joinParams = match(params) => {
+  [] => { "" },
+  [only] => { only },
+  [head, ..tail] => { head ++ " " ++ joinParams(tail) },
+};
+
+let command0 = (name) => {
+  name ++ lineEnding
+};
+
+let command1 = (name, value) => {
+  name ++ " " ++ value ++ lineEnding
+};
+
+let commandTrailing = (name, target, text) => {
+  name ++ " " ++ target ++ " :" ++ text ++ lineEnding
+};
+
+let nick = (name) => {
+  command1("NICK", name)
+};
+
+let user = (name, realName) => {
+  "USER " ++ name ++ " 0 * :" ++ realName ++ lineEnding
+};
+
+let join = (channel) => {
+  command1("JOIN", channel)
+};
+
+let pong = (token) => {
+  "PONG :" ++ token ++ lineEnding
+};
+
+let privmsg = (target, text) => {
+  commandTrailing("PRIVMSG", target, text)
+};
+
+let quit = (reason) => {
+  "QUIT :" ++ reason ++ lineEnding
+};
+
+let firstParam = (message) => {
+  List.at(message.params, 0)
+};
+
+let secondParam = (message) => {
+  List.at(message.params, 1)
+};

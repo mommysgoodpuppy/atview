@@ -1,0 +1,23 @@
+-- Minimal reproduction for ISSUE-006.
+--
+-- `wm check` reports ok, but `wm run`/`wm compile` fails later with:
+--   unresolved FFI call reached Core elaboration
+
+from js.global("process") import {
+  stdin: Js.Object,
+};
+
+let main = () => {
+  match(stdin) {
+    Err(_) => { print("stdin unavailable") },
+    Ok(input) => {
+      input.on("data", (chunk) => {
+        match(chunk.toString()) {
+          Ok(_) => { print("data") },
+          Err(_) => { print("decode failed") },
+        }
+      });
+      void
+    },
+  }
+};
