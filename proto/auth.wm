@@ -1,0 +1,201 @@
+-- AT Protocol session authentication and local credential loading.
+
+from "./xrpc.wm" import * as Xrpc;
+from js.global("Deno") import { readTextFile };
+from js.global import { fetch };
+from js.global("JSON") import {
+  stringify: Js.Value -> String,
+} as JSON;
+
+record Credentials = {
+  identifier: String,
+  appPassword: String,
+};
+
+record Session = {
+  accessJwt: String,
+  refreshJwt: String,
+  handle: String,
+  did: String,
+};
+
+let envFile = ".env";
+
+let rec findValue = match(lines, prefix, width) => {
+  ([], _, _) => {
+    Ok(None)
+  },
+  ([line, ..rest], _, _) => {
+    line :> .startsWith(prefix) :> Result.andThen((matches) => {
+      if (matches) {
+        line :> .slice(width) :> Result.map(Some)
+      } else {
+        findValue(rest, prefix, width)
+      }
+    })
+  },
+};
+
+let unquote = (text) => {
+  Result|
+    text :> .startsWith("\""),
+    text :> .endsWith("\""),
+    text :> .startsWith("'"),
+    text :> .endsWith("'")
+  | :> Result.andThen((doubleStart, doubleEnd, singleStart, singleEnd) => {
+    if ((doubleStart && doubleEnd) || (singleStart && singleEnd)) {
+      text :> .slice(1, -1)
+    } else {
+      Ok(text)
+    }
+  })
+};
+
+let parseCredentials = (text: String) => {
+  text :> .split("\n") :> Result.andThen((linesArray) => {
+    let lines = Js.Array.toList(linesArray);
+    Result.map2(
+      findValue(lines, "USER=", 5),
+      findValue(lines, "APPPASS=", 8),
+      (identifier, appPassword) => {
+        (identifier, appPassword)
+      },
+    )
+  }) :> Result.mapErr(Xrpc.JavaScriptFailure) :> Result.andThen((identifier, appPassword) => {
+    match((identifier, appPassword)) {
+      (Some(user), Some(password)) => {
+        Result.map2(
+          unquote(user),
+          unquote(password),
+          Credentials,
+        ) :> Result.mapErr(Xrpc.JavaScriptFailure) :> Result.andThen((credentials) => {
+          if (credentials.identifier == "" || credentials.appPassword == "") {
+            Err(Xrpc.ConfigFailure("USER and APPPASS must not be empty in " ++ envFile))
+          } else {
+            Ok(credentials)
+          }
+        })
+      },
+      _ => {
+        Err(Xrpc.ConfigFailure("expected USER and APPPASS in " ++ envFile))
+      },
+    }
+  })
+};
+
+let loadCredentials = () => {
+  let parseT = Monad.lift Task (text) => {
+    parseCredentials(text)
+      :> Task.fromResult
+  };
+  readTextFile(envFile)
+    :> Task.mapErr(Xrpc.JavaScriptFailure)
+    :> parseT
+};
+
+let createSession = (credentials) => {
+  let encodeBody = Monad.liftError Task Xrpc.JavaScriptFailure (values) => {
+    let (identifier, password) = values;
+    JSON.stringify(JSON{
+      identifier: identifier,
+      password: password,
+    }) :> Task.fromResult
+  };
+  let request = Monad.liftError Task Xrpc.JavaScriptFailure (body) => {
+    fetch(
+      "https://bsky.social/xrpc/com.atproto.server.createSession",
+      JSON{
+        method: "POST",
+        headers: JSON{ "Content-Type": "application/json" },
+        body: body,
+      },
+    )
+  };
+  let inspectStatus = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+    Result|response.ok, response.status|
+      :> Result.map((ok, status) => {
+        (response, ok, status)
+      })
+      :> Task.fromResult
+  };
+  let requireOk = Monad.lift Task (response, ok, status) => {
+    if (ok) {
+      Task.succeed(response)
+    } else {
+      response :> .text()
+        :> Task.mapErr(Xrpc.JavaScriptFailure)
+        :> Task.andThen((body) => {
+          Task.fail(Xrpc.HttpFailure(status, body))
+        })
+    }
+  };
+  let readBody = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+    response :> .json() :> Task.andThen((raw) => {
+      let body: Result<Js.Object, Js.Error> = raw :> Json.assert;
+      body :> Task.fromResult
+    })
+  };
+  let decodeSession = Monad.liftError Task Xrpc.ResponseShapeFailure (body) => {
+    let session: Result<Session, Js.Error> = body :> Json.assert;
+    session :> Task.fromResult
+  };
+
+  Task.succeed((credentials.identifier, credentials.appPassword))
+    :> encodeBody
+    :> request
+    :> inspectStatus
+    :> requireOk
+    :> readBody
+    :> decodeSession
+};
+
+let login = () => {
+  loadCredentials() :> Task.andThen(createSession)
+};
+
+let refreshSession = (session) => {
+  let request = Monad.liftError Task Xrpc.JavaScriptFailure (refreshJwt) => {
+    fetch(
+      "https://bsky.social/xrpc/com.atproto.server.refreshSession",
+      JSON{
+        method: "POST",
+        headers: JSON{ "Authorization": "Bearer " ++ refreshJwt },
+      },
+    )
+  };
+  let inspectStatus = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+    Result|response.ok, response.status|
+      :> Result.map((ok, status) => {
+        (response, ok, status)
+      })
+      :> Task.fromResult
+  };
+  let requireOk = Monad.lift Task (response, ok, status) => {
+    if (ok) {
+      Task.succeed(response)
+    } else {
+      response :> .text()
+        :> Task.mapErr(Xrpc.JavaScriptFailure)
+        :> Task.andThen((body) => {
+          Task.fail(Xrpc.HttpFailure(status, body))
+        })
+    }
+  };
+  let readBody = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+    response :> .json() :> Task.andThen((raw) => {
+      let body: Result<Js.Object, Js.Error> = raw :> Json.assert;
+      body :> Task.fromResult
+    })
+  };
+  let decodeSession = Monad.liftError Task Xrpc.ResponseShapeFailure (body) => {
+    let refreshed: Result<Session, Js.Error> = body :> Json.assert;
+    refreshed :> Task.fromResult
+  };
+
+  Task.succeed(session.refreshJwt)
+    :> request
+    :> inspectStatus
+    :> requireOk
+    :> readBody
+    :> decodeSession
+};

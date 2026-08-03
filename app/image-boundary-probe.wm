@@ -1,0 +1,18 @@
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../proto/xrpc.wm" import { AppError };
+from "../tui/kitty.wm" import * as Kitty;
+
+let loadImage = (post: FeedPost) => {
+  match(post.image) {
+    None => { Task.succeed(None) },
+    Some(source) => {
+      let typedSource: Views.PostImage = source;
+      Kitty.load(typedSource)
+        :> Task.map(Some)
+        :> Task.recover((_) => { None })
+    },
+  }
+};
+
+let main = () => { print("typecheck only") };

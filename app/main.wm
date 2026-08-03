@@ -1,0 +1,60 @@
+-- First real consumer of the Workman TUI library.
+-- Authenticates, loads the configured account's home timeline and author feed
+-- directly over XRPC, then browses them without exposing credentials or tokens.
+
+from "../proto/api.wm" import { AppFeeds, loadAppFeeds };
+from "../proto/xrpc.wm" import { AppError, describeError };
+from "../tui/command.wm" import * as Command;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/kitty.wm" import * as Kitty;
+-- These nominal types occur transitively in render's retained result.
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/runtime.wm" import * as Runtime;
+from "../tui/surface.wm" import * as Surface;
+from "./data.wm" import { loadUiFeeds };
+from "./graph.wm" import { buildPrefetchPlan, scheduleThreadPrefetch };
+from "./model.wm" import {
+  RenderDependency,
+  RenderModel,
+  ThreadLoading,
+  Timeline,
+  UiFeeds,
+  UiState,
+};
+from "./render.wm" import * as Render;
+from "./update.wm" import { updateState };
+
+let startFeeds = (feeds: UiFeeds) => {
+  let initial = UiState(
+    0,
+    Timeline,
+    Kitty.Fit,
+    feeds,
+    false,
+    "",
+    0,
+    ThreadLoading(""),
+    [],
+  );
+  let plan = buildPrefetchPlan(initial);
+  let started = Runtime.runRetainedManaged(
+    plan.state,
+    plan.tasks,
+    (state: UiState) => { scheduleThreadPrefetch(state) },
+    (key, state: UiState) => { updateState(key, state) },
+    (previous, state: UiState, size: Geometry.Size) => {
+      Render.render(previous, state, size)
+    },
+  );
+  Task.succeed(started)
+};
+
+let main = () => {
+  loadAppFeeds(30)
+    :> Task.andThen(loadUiFeeds)
+    :> Task.andThen(startFeeds)
+    :> Task.recover((error) => {
+      print("atview tui: " ++ describeError(error));
+      void
+    })
+};

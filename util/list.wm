@@ -1,0 +1,29 @@
+-- General list operations that are plausible additions to the Workman std.
+
+let rec choose = match(options) => {
+  [] => { [] },
+  [None, ..rest] => { choose(rest) },
+  [Some(value), ..rest] => { [value, ..choose(rest)] },
+};
+
+let rec containsBy = match(value, values, same) => {
+  (_, [], _) => { false },
+  (_, [candidate, ..rest], _) => {
+    if (same(value, candidate)) {
+      true
+    } else {
+      containsBy(value, rest, same)
+    }
+  },
+};
+
+let rec removeFirstBy = match(value, values, same) => {
+  (_, [], _) => { [] },
+  (_, [candidate, ..rest], _) => {
+    if (same(value, candidate)) {
+      rest
+    } else {
+      [candidate, ..removeFirstBy(value, rest, same)]
+    }
+  },
+};

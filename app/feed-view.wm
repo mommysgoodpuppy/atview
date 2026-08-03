@@ -1,0 +1,279 @@
+-- Feed-card measurement, wrapping, placement, and drawing.
+
+from "./model.wm" import *;
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../tui/ansi.wm" import * as Ansi;
+from "../tui/draw.wm" import * as Draw;
+from "../tui/element.wm" import * as Ui;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/kitty.wm" import * as Kitty;
+
+let wrapOnce = (text, width) => {
+  let cleaned = text :> .replaceAll("\n", " ") :> Result.withDefault(text);
+  let size = cleaned :> .length :> Result.withDefault(0);
+  if (width <= 0 || size <= width) {
+    (cleaned, "")
+  } else {
+    let candidate = cleaned :> .slice(0, width + 1) :> Result.withDefault(cleaned);
+    let space = candidate :> .lastIndexOf(" ") :> Result.withDefault(-1);
+    let boundary = if (space <= 0) { width } else { space };
+    let next = if (space <= 0) { boundary } else { boundary + 1 };
+    (
+      cleaned :> .slice(0, boundary) :> Result.withDefault(""),
+      cleaned :> .slice(next) :> Result.withDefault(""),
+    )
+  }
+};
+
+let postRows = (text, width) => {
+  let (first, afterFirst) = wrapOnce(text, width);
+  let (second, remaining) = wrapOnce(afterFirst, width);
+  let finalSecond = if (remaining == "" || width <= 1) {
+    second
+  } else {
+    (second :> .slice(0, width - 1) :> Result.withDefault(second)) ++ "…"
+  };
+  PostRows(first, finalSecond)
+};
+
+let rec wrapLines = match(text, width, remaining) => {
+  (_, _, 0) => { [] },
+  ("", _, _) => { [] },
+  (_, _, _) => {
+    let (line, rest) = wrapOnce(text, width);
+    let next = if (rest == text) { "" } else { rest };
+    [line, ..wrapLines(next, width, remaining - 1)]
+  },
+};
+
+let rec indentation = (depth) => {
+  if (depth <= 0) { "" } else { "  " ++ indentation(depth - 1) }
+};
+
+let metrics = (post) => {
+  countText(post.replyCount) ++ " replies   " ++
+    countText(post.repostCount) ++ " reposts   " ++
+    countText(post.likeCount) ++ " likes"
+};
+
+let imageRows = (width, maximum, size, scale, item) => {
+  match(item.image) {
+    None => { 0 },
+    Some(image) => {
+      if (maximum <= 0 || width <= 0) {
+        0
+      } else {
+        match(scale) {
+          Kitty.Fill => { maximum },
+          Kitty.Fit => {
+            let placed = Kitty.fitPlacement(
+              Geometry.rect(0, 0, width, maximum),
+              size,
+              image,
+            );
+            placed.rows
+          },
+        }
+      }
+    },
+  }
+};
+
+let baseCardHeight = (width, size, item) => {
+  let avatarColumns = match(item.avatar) {
+    Some(_) => { Kitty.squareColumns(2, size) },
+    None => { 0 },
+  };
+  let textWidth = Geometry.nonNegative(
+    width - 2 - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
+  );
+  let text = postRows(item.post.text, textWidth);
+  if (text.second == "") { 5 } else { 6 }
+};
+
+let maximumCardHeight = (size: Geometry.Size) => {
+  Geometry.clamp(
+    8,
+    14,
+    Geometry.percentOf(Geometry.nonNegative(size.height - 1), 60),
+  )
+};
+
+let cardHeight = (width, size, scale, item) => {
+  let base = baseCardHeight(width, size, item);
+  let avatarColumns = match(item.avatar) {
+    Some(_) => { Kitty.squareColumns(2, size) },
+    None => { 0 },
+  };
+  let mediaWidth = Geometry.nonNegative(
+    width - 2 - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
+  );
+  let maximumImageRows = Geometry.nonNegative(maximumCardHeight(size) - base);
+  base + imageRows(mediaWidth, maximumImageRows, size, scale, item)
+};
+
+let rec heightOfFirst = (posts, count, layout: FeedLayout) => {
+  if (count <= 0) {
+    0
+  } else {
+    match(posts) {
+      [] => { 0 },
+      [item, ..tail] => {
+        let height = cardHeight(layout.width, layout.size, layout.scale, item);
+        let rest = heightOfFirst(tail, count - 1, layout);
+        height + (if (rest <= 0) { 0 } else { rest - 1 })
+      },
+    }
+  }
+};
+
+let rec visibleStart = (posts, selected, start, window: WindowLayout) => {
+  let layout = FeedLayout(window.width, window.size, window.scale);
+  let needed = heightOfFirst(
+    List.drop(posts, start),
+    selected - start + 1,
+    layout,
+  );
+  if (needed <= window.height || start >= selected) {
+    start
+  } else {
+    visibleStart(posts, selected, start + 1, window)
+  }
+};
+
+let cardText = (area, row, x, width, value, style) => {
+  Ui.showIf(
+    row < area.height - 1,
+    Ui.text(
+      Geometry.rect(x, area.y + row, width, 1),
+      value,
+      style,
+    ),
+  )
+};
+
+let card = (area, item, size, scale, joinedBottom, avatarId) => {
+  let innerWidth = Geometry.nonNegative(area.width - 2);
+  let avatarRows = if (area.height > 3) { 2 } else { 0 };
+  let avatarColumns = match(item.avatar) {
+    Some(_) => { Kitty.squareColumns(avatarRows, size) },
+    None => { 0 },
+  };
+  let textX = area.x + 1 + avatarColumns +
+    (if (avatarColumns > 0) { 1 } else { 0 });
+  let textWidth = Geometry.nonNegative(
+    innerWidth - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
+  );
+  let text = postRows(item.post.text, textWidth);
+  let secondLine = text.second != "";
+  let mediaRow = if (secondLine) { 4 } else { 3 };
+  let metricsRow = Geometry.nonNegative(area.height - 2);
+  let rows = imageRows(
+    textWidth,
+    Geometry.nonNegative(metricsRow - mediaRow),
+    size,
+    scale,
+    item,
+  );
+  Ui.fragment([
+    Ui.timelineBox(area, false, area.y > 0, joinedBottom),
+    cardText(
+      area,
+      1,
+      textX,
+      textWidth,
+      item.post.authorName ++ "  @" ++ item.post.authorHandle,
+      Draw.plain,
+    ),
+    cardText(
+      area,
+      2,
+      textX,
+      textWidth,
+      text.first,
+      Draw.plain,
+    ),
+    Ui.showIf(
+      secondLine,
+      cardText(
+        area,
+        3,
+        textX,
+        textWidth,
+        text.second,
+        Draw.plain,
+      ),
+    ),
+    cardText(
+      area,
+      metricsRow,
+      textX,
+      textWidth,
+      metrics(item.post) ++ "   " ++ item.post.createdAt,
+      Draw.muted,
+    ),
+    Ui.optional(item.avatar, (avatar) => {
+      Ui.image(
+        avatarId,
+        Geometry.rect(area.x + 1, area.y + 1, avatarColumns, avatarRows),
+        Kitty.Fill,
+        avatar,
+      )
+    }),
+    Ui.optional(item.image, (image) => {
+      Ui.image(
+        99000 + avatarId,
+        Geometry.rect(textX, area.y + mediaRow, textWidth, rows),
+        scale,
+        image,
+      )
+    }),
+  ])
+};
+
+let rec cards = match(area, posts, index, layout) => {
+  (_, [], _, _) => { Ui.empty },
+  (_, _, _, _) => {
+    match(posts) {
+      [] => { Ui.empty },
+      [item, ..tail] => {
+        let height = cardHeight(area.width, layout.size, layout.scale, item);
+        if (area.height < 2) {
+          Ui.fill(area, "─", Draw.muted)
+        } else {
+          let visibleHeight = Geometry.clamp(2, height, area.height);
+          let joinedBottom = match(tail) {
+            [] => { false },
+            _ => { area.height > visibleHeight },
+          };
+          Ui.fragment([
+            card(
+              Geometry.rect(area.x, area.y, area.width, visibleHeight),
+              item,
+              layout.size,
+              layout.scale,
+              joinedBottom,
+              1000 + index,
+            ),
+            cards(
+              Geometry.rect(
+                area.x,
+                area.y + visibleHeight - 1,
+                area.width,
+                area.height - visibleHeight + 1,
+              ),
+              tail,
+              index + 1,
+              layout,
+            ),
+          ])
+        }
+      },
+    }
+  },
+};
+
+let renderCards = (area, posts, index, layout: FeedLayout) => {
+  Ui.render(layout.size, cards(area, posts, index, layout))
+};

@@ -1,0 +1,71 @@
+-- Generic XRPC query construction and application errors.
+
+from js.global import { encodeURIComponent };
+
+record QueryParam = {
+  name: String,
+  value: String,
+};
+
+type AppError =
+  | JavaScriptFailure<Js.Error>
+  | HttpFailure<Number, String>
+  | ResponseShapeFailure<Js.Error>
+  | ConfigFailure<String>;
+
+let appView = "https://public.api.bsky.app";
+
+let describeJsError = match(error) => {
+  Js.Error(message) => { message },
+  Js.Unknown => { "unknown JavaScript error" },
+};
+
+let describeError = match(error) => {
+  JavaScriptFailure(jsError) => {
+    describeJsError(jsError)
+  },
+  HttpFailure(status, body) => {
+    "HTTP " ++ Result.textOf(status) ++ ": " ++ body
+  },
+  ResponseShapeFailure(jsError) => {
+    "unexpected AppView response: " ++ describeJsError(jsError)
+  },
+  ConfigFailure(message) => {
+    message
+  },
+};
+
+let encodeParam = (param) => {
+  Result.map2(
+    encodeURIComponent(param.name),
+    encodeURIComponent(param.value),
+    (name, value) => { name ++ "=" ++ value },
+  )
+};
+
+let rec encodeParams = match(params) => {
+  [] => { Ok("") },
+  [only] => {
+    encodeParam(only)
+  },
+  [head, ..tail] => {
+    Result.map2(
+      encodeParam(head),
+      encodeParams(tail),
+      (encodedHead, encodedTail) => {
+        encodedHead ++ "&" ++ encodedTail
+      },
+    )
+  },
+};
+
+let buildUrlOn = (base, nsid, params) => {
+  encodeParams(params) :> Result.map((query) => {
+    let suffix = if (query == "") { "" } else { "?" ++ query };
+    base ++ "/xrpc/" ++ nsid ++ suffix
+  })
+};
+
+let buildUrl = (nsid, params) => {
+  buildUrlOn(appView, nsid, params)
+};

@@ -1,0 +1,388 @@
+-- Selected-post thread and reply-tree drawing.
+
+from "./feed-view.wm" import {
+  imageRows,
+  indentation,
+  metrics,
+  postRows,
+  wrapLines,
+};
+from "./model.wm" import *;
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../tui/ansi.wm" import * as Ansi;
+from "../tui/draw.wm" import * as Draw;
+from "../tui/element.wm" import * as Ui;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/kitty.wm" import * as Kitty;
+
+record ReplyElements = {
+  element: Ui.Element,
+  nextRow: Number,
+  nextImageId: Number,
+};
+
+record ReplyLayout = {
+  avatarRows: Number,
+  avatarColumns: Number,
+  avatarX: Number,
+  textX: Number,
+  textWidth: Number,
+};
+
+let replyPlaceholder = match(node) => {
+  UiMissingPost(_) => { Some("[missing reply]") },
+  UiBlockedPost(_) => { Some("[blocked reply]") },
+  UiUnknownThread(typeName) => { Some("[unknown] " ++ typeName) },
+  UiThreadPost(_post, _avatar, _children) => { None },
+};
+
+let layoutReply = (area, size, cursor, avatar) => {
+  let avatarRows = 2;
+  let nestingColumns = Geometry.clamp(
+    0,
+    Geometry.nonNegative(area.width - 1),
+    cursor.depth * 2,
+  );
+  let requestedAvatarColumns = match(avatar) {
+    Some(_) => { Kitty.squareColumns(avatarRows, size) },
+    None => { 0 },
+  };
+  let avatarColumns = if (
+    nestingColumns + requestedAvatarColumns < area.width
+  ) {
+    requestedAvatarColumns
+  } else {
+    0
+  };
+  let avatarX = area.x + nestingColumns;
+  let textX = avatarX + avatarColumns +
+    (if (avatarColumns > 0) { 1 } else { 0 });
+  ReplyLayout(
+    avatarRows,
+    avatarColumns,
+    avatarX,
+    textX,
+    Geometry.nonNegative(
+      area.width - nestingColumns - avatarColumns -
+        (if (avatarColumns > 0) { 1 } else { 0 }),
+    ),
+  )
+};
+
+let replyPost = (area, cursor, layout: ReplyLayout, post, avatar) => {
+  let name = post.author.displayName
+    :> Option.withDefault(post.author.handle);
+  let excerpt = postRows(
+    post.text,
+    Geometry.nonNegative(layout.textWidth - 2),
+  );
+  Ui.fragment([
+    Ui.optional(avatar, (image) => {
+      Ui.image(
+        cursor.imageId,
+        Geometry.rect(
+          layout.avatarX,
+          area.y + cursor.row,
+          layout.avatarColumns,
+          layout.avatarRows,
+        ),
+        Kitty.Fill,
+        image,
+      )
+    }),
+    Ui.text(
+      Geometry.rect(
+        layout.textX,
+        area.y + cursor.row,
+        layout.textWidth,
+        1,
+      ),
+      "↳ " ++ name ++ "  @" ++ post.author.handle,
+      Draw.accent,
+    ),
+    Ui.showIf(
+      cursor.row + 1 < area.height,
+      Ui.text(
+        Geometry.rect(
+          layout.textX,
+          area.y + cursor.row + 1,
+          layout.textWidth,
+          1,
+        ),
+        "  " ++ excerpt.first,
+        Draw.plain,
+      ),
+    ),
+  ])
+};
+
+let rec renderReplies = match(area, size, nodes, cursor) => {
+  (_, _, [], _) => {
+    ReplyElements(Ui.empty, cursor.row, cursor.imageId)
+  },
+  (_, _, _, _) => {
+    if (cursor.row >= area.height) {
+      ReplyElements(Ui.empty, cursor.row, cursor.imageId)
+    } else {
+      match(nodes) {
+        [] => {
+          ReplyElements(Ui.empty, cursor.row, cursor.imageId)
+        },
+        [node, ..tail] => {
+          match(replyPlaceholder(node)) {
+            Some(label) => {
+              let current = Ui.text(
+                Geometry.rect(
+                  area.x,
+                  area.y + cursor.row,
+                  area.width,
+                  1,
+                ),
+                indentation(cursor.depth) ++ "↳ " ++ label,
+                Draw.muted,
+              );
+              let rest = renderReplies(
+                area,
+                size,
+                tail,
+                ReplyCursor(
+                  cursor.depth,
+                  cursor.row + 1,
+                  cursor.imageId,
+                ),
+              );
+              ReplyElements(
+                Ui.fragment([current, rest.element]),
+                rest.nextRow,
+                rest.nextImageId,
+              )
+            },
+            None => {
+              match(node) {
+                UiThreadPost(post, avatar, children) => {
+                  let layout = layoutReply(area, size, cursor, avatar);
+                  let nested = renderReplies(
+                    area,
+                    size,
+                    children,
+                    ReplyCursor(
+                      cursor.depth + 1,
+                      Geometry.clamp(
+                        cursor.row,
+                        area.height,
+                        cursor.row + 2,
+                      ),
+                      cursor.imageId + 1,
+                    ),
+                  );
+                  let rest = renderReplies(
+                    area,
+                    size,
+                    tail,
+                    ReplyCursor(
+                      cursor.depth,
+                      nested.nextRow,
+                      nested.nextImageId,
+                    ),
+                  );
+                  ReplyElements(
+                    Ui.fragment([
+                      replyPost(area, cursor, layout, post, avatar),
+                      nested.element,
+                      rest.element,
+                    ]),
+                    rest.nextRow,
+                    rest.nextImageId,
+                  )
+                },
+                UiMissingPost(_) => {
+                  ReplyElements(Ui.empty, cursor.row, cursor.imageId)
+                },
+                UiBlockedPost(_) => {
+                  ReplyElements(Ui.empty, cursor.row, cursor.imageId)
+                },
+                UiUnknownThread(_) => {
+                  ReplyElements(Ui.empty, cursor.row, cursor.imageId)
+                },
+              }
+            },
+          }
+        },
+      }
+    }
+  },
+};
+let renderThreadStatus = (area, thread, size) => {
+  match(thread) {
+    ThreadLoading(_) => {
+      Ui.text(area, "loading replies…", Draw.muted)
+    },
+    ThreadFailed(_, message) => {
+      Ui.text(area, "replies unavailable: " ++ message, Draw.muted)
+    },
+    ThreadReady(_, node) => {
+      match(node) {
+        UiThreadPost(_rootPost, _rootAvatar, replies) => {
+          match(replies) {
+            [] => { Ui.text(area, "no replies", Draw.muted) },
+            _ => {
+              let rendered = renderReplies(
+                area,
+                size,
+                replies,
+                ReplyCursor(0, 0, 2001),
+              );
+              rendered.element
+            },
+          }
+        },
+        UiMissingPost(_) => {
+          Ui.text(area, "post is unavailable", Draw.muted)
+        },
+        UiBlockedPost(_) => {
+          Ui.text(area, "post is blocked", Draw.muted)
+        },
+        UiUnknownThread(typeName) => {
+          Ui.text(area, "unknown thread variant: " ++ typeName, Draw.muted)
+        },
+      }
+    },
+  }
+};
+
+let threadPane = (area, state: UiState, size: Geometry.Size) => {
+  let inner = Geometry.inset(area, 1);
+  let frame = Ui.box(area, "post + replies", false);
+  match(List.at(postsFor(state.feeds, state.view), state.selected)) {
+    None => {
+      Ui.fragment([
+        frame,
+        Ui.text(inner, "no selected post", Draw.muted),
+      ])
+    },
+    Some(item) => {
+      let avatarRows = 2;
+      let avatarColumns = match(item.avatar) {
+        Some(_) => { Kitty.squareColumns(avatarRows, size) },
+        None => { 0 },
+      };
+      let contentX = inner.x + avatarColumns +
+        (if (avatarColumns > 0) { 1 } else { 0 });
+      let contentWidth = Geometry.nonNegative(
+        inner.width - avatarColumns -
+          (if (avatarColumns > 0) { 1 } else { 0 }),
+      );
+      let lines = wrapLines(
+        item.post.text,
+        contentWidth,
+        Geometry.clamp(1, 6, inner.height - 5),
+      );
+      let textRows = List.length(lines);
+      let mediaRow = 1 + textRows;
+      let availableImageRows = Geometry.clamp(
+        0,
+        14,
+        inner.height - mediaRow - 5,
+      );
+      let mediaRows = imageRows(
+        inner.width,
+        availableImageRows,
+        size,
+        state.imageScale,
+        item,
+      );
+      let metricsRow = mediaRow + mediaRows;
+      let repliesRow = metricsRow + 2;
+      Ui.fragment([
+        frame,
+        Ui.optional(item.avatar, (image) => {
+          Ui.image(
+            2000,
+            Geometry.rect(
+              inner.x,
+              inner.y,
+              avatarColumns,
+              avatarRows,
+            ),
+            Kitty.Fill,
+            image,
+          )
+        }),
+        Ui.text(
+          Geometry.rect(contentX, inner.y, contentWidth, 1),
+          item.post.authorName ++ "  @" ++ item.post.authorHandle,
+          Draw.accent,
+        ),
+        Ui.lines(
+          Geometry.rect(
+            contentX,
+            inner.y + 1,
+            contentWidth,
+            textRows,
+          ),
+          lines,
+          Draw.plain,
+        ),
+        Ui.optional(item.image, (image) => {
+          Ui.showIf(
+            mediaRows > 0,
+            Ui.image(
+              1,
+              Geometry.rect(
+                inner.x,
+                inner.y + mediaRow,
+                inner.width,
+                mediaRows,
+              ),
+              state.imageScale,
+              image,
+            ),
+          )
+        }),
+        Ui.text(
+          Geometry.rect(
+            contentX,
+            inner.y + metricsRow,
+            contentWidth,
+            1,
+          ),
+          metrics(item.post) ++ "   " ++ item.post.createdAt,
+          Draw.muted,
+        ),
+        Ui.text(
+          Geometry.rect(
+            inner.x,
+            inner.y + repliesRow - 1,
+            inner.width,
+            1,
+          ),
+          "replies",
+          Draw.accent,
+        ),
+        renderThreadStatus(
+          Geometry.rect(
+            inner.x,
+            inner.y + repliesRow,
+            inner.width,
+            Geometry.nonNegative(inner.height - repliesRow),
+          ),
+          state.thread,
+          size,
+        ),
+      ])
+    },
+  }
+};
+
+let renderThreadPane = (area, state: UiState, size: Geometry.Size) => {
+  Ui.render(size, threadPane(area, state, size))
+};
+let rec deleteThreadImages = (identifier, remaining) => {
+  if (remaining <= 0) {
+    ""
+  } else {
+    Kitty.deleteImage(identifier) ++
+      deleteThreadImages(identifier + 1, remaining - 1)
+  }
+};

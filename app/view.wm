@@ -1,0 +1,162 @@
+-- Terminal layout and content rendering for the atview application.
+
+from "./model.wm" import *;
+from "./feed-view.wm" import *;
+from "./thread-view.wm" import *;
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../tui/ansi.wm" import * as Ansi;
+from "../tui/draw.wm" import * as Draw;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/kitty.wm" import * as Kitty;
+
+let renderFooter = (state: UiState, size: Geometry.Size) => {
+  let feeds = state.feeds;
+  let posts = postsFor(feeds, state.view);
+  let (_, footer) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let activity = if (state.loading) {
+    "   loading…"
+  } else {
+    if (state.status == "") { "" } else { "   " ++ state.status }
+  };
+  let graph = graphCounts(state.threadGraph);
+  let background = if (graph.pending > 0) {
+    "   bg " ++ Result.textOf(graph.ready) ++
+      "+" ++ Result.textOf(graph.pending)
+  } else {
+    ""
+  };
+  Draw.fill(footer, " ", Draw.status) ++
+    Draw.text(
+      footer,
+      " " ++ titleFor(feeds, state.view) ++ "   " ++
+        Result.textOf(state.selected + 1) ++ "/" ++ Result.textOf(List.length(posts)) ++
+        activity ++ background ++
+        "   t timeline   m my posts   f fit/fill   ↑/↓ j/k move   q quit ",
+      Draw.status,
+    )
+};
+
+let rec renderBorderAt = match(area, posts, request) => {
+  (_, [], _) => { "" },
+  (_, _, _) => {
+    match(posts) {
+      [] => { "" },
+      [item, ..tail] => {
+        let height = cardHeight(
+          area.width,
+          request.layout.size,
+          request.layout.scale,
+          item,
+        );
+        if (area.height < 2) {
+          ""
+        } else {
+          let visibleHeight = Geometry.clamp(2, height, area.height);
+          if (request.cursor.index == request.target) {
+            let borderArea = Geometry.rect(
+              area.x,
+              area.y,
+              area.width,
+              visibleHeight,
+            );
+            let joinedBottom = match(tail) {
+              [] => { false },
+              _ => { area.height > visibleHeight },
+            };
+            if (request.standalone) {
+              Draw.box(borderArea, "", request.active)
+            } else {
+              Draw.timelineBox(
+                borderArea,
+                request.active,
+                area.y > 0,
+                joinedBottom,
+              )
+            }
+          } else {
+            renderBorderAt(
+              Geometry.rect(
+                area.x,
+                area.y + visibleHeight - 1,
+                area.width,
+                area.height - visibleHeight + 1,
+              ),
+              tail,
+              BorderRender(
+                CardCursor(
+                  request.cursor.selected,
+                  request.cursor.index + 1,
+                ),
+                request.layout,
+                request.target,
+                request.active,
+                request.standalone,
+              ),
+            )
+          }
+        }
+      },
+    }
+  },
+};
+
+let renderFull = (state: UiState, size: Geometry.Size) => {
+  let posts = postsFor(state.feeds, state.view);
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  let start = visibleStart(
+    posts,
+    state.selected,
+    0,
+    WindowLayout(
+      split.feed.width,
+      split.feed.height,
+      size,
+      state.imageScale,
+    ),
+  );
+  let visible = List.drop(posts, start);
+  let cursor = CardCursor(state.selected, start);
+  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
+    renderCards(split.feed, visible, start, layout) ++
+    renderBorderAt(
+      split.feed,
+      visible,
+      BorderRender(cursor, layout, state.selected, true, true),
+    ) ++
+    renderThreadPane(split.thread, state, size) ++
+    renderFooter(state, size) ++
+    Draw.endFrame ++ Ansi.endSynchronizedUpdate
+};
+
+let renderSelectionOutline = (
+  state: UiState,
+  size: Geometry.Size,
+  start,
+  target,
+  active,
+  standalone,
+) => {
+  let posts = postsFor(state.feeds, state.view);
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  let visible = List.drop(posts, start);
+  let cursor = CardCursor(state.selected, start);
+  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  renderBorderAt(
+    split.feed,
+    visible,
+    BorderRender(cursor, layout, target, active, standalone),
+  )
+};
+
+let renderThreadRegion = (state: UiState, size: Geometry.Size) => {
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  Kitty.deleteImage(1) ++
+    deleteThreadImages(2000, size.height + 1) ++
+    Draw.fill(split.thread, " ", Draw.plain) ++
+    renderThreadPane(split.thread, state, size)
+};

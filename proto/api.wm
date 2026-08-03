@@ -1,0 +1,281 @@
+-- Typed AT Protocol endpoint projections.
+
+from "./auth.wm" import * as Auth;
+from "./xrpc.wm" import * as Xrpc;
+from "./views.wm" import * as Views;
+from js.global import { fetch };
+
+record FeedPost = {
+  uri: String,
+  text: String,
+  createdAt: String,
+  authorHandle: String,
+  authorName: String,
+  replyCount: Option<Number>,
+  repostCount: Option<Number>,
+  likeCount: Option<Number>,
+  image: Option<Views.PostImage>,
+  avatar: Option<String>,
+};
+
+record OwnFeed = {
+  handle: String,
+  did: String,
+  posts: List<FeedPost>,
+};
+
+record AppFeeds = {
+  handle: String,
+  did: String,
+  accessJwt: String,
+  timelinePosts: List<FeedPost>,
+  ownPosts: List<FeedPost>,
+  timelineCursor: Option<String>,
+  ownCursor: Option<String>,
+};
+
+record FeedPage = {
+  posts: List<FeedPost>,
+  cursor: Option<String>,
+};
+
+let feedPost = (post) => {
+  FeedPost(
+    post.uri,
+    post.text,
+    post.createdAt,
+    post.author.handle,
+    post.author.displayName :> Option.withDefault(post.author.handle),
+    post.replyCount,
+    post.repostCount,
+    post.likeCount,
+    post.image,
+    post.author.avatar,
+  )
+};
+
+let query = (base, accessToken, nsid, params) => {
+  let buildUrlT = Monad.liftError Task Xrpc.JavaScriptFailure (request) => {
+    let (host, token, method, queryParams) = request;
+    Xrpc.buildUrlOn(host, method, queryParams)
+      :> Result.map((url) => { (url, token) })
+      :> Task.fromResult
+  };
+  let request = Monad.liftError Task Xrpc.JavaScriptFailure (url, token) => {
+    let response = match(token) {
+      None => {
+        fetch(url)
+      },
+      Some(accessJwt) => {
+        fetch(
+          url,
+          JSON{
+            headers: JSON{ "Authorization": "Bearer " ++ accessJwt },
+          },
+        )
+      },
+    };
+    response :> Task.map((value) => {
+      (url, value)
+    })
+  };
+  let inspectStatus = Monad.liftError Task Xrpc.JavaScriptFailure (url, response) => {
+    Result|response.ok, response.status|
+      :> Result.map((ok, status) => {
+        (url, response, ok, status)
+      })
+      :> Task.fromResult
+  };
+  let requireOk = Monad.lift Task (url, response, ok, status) => {
+    if (ok) {
+      Task.succeed(response)
+    } else {
+      response :> .text()
+        :> Task.mapErr(Xrpc.JavaScriptFailure)
+        :> Task.andThen((body) => {
+          Task.fail(Xrpc.HttpFailure(status, body))
+        })
+    }
+  };
+  let readBody = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+    response :> .json() :> Task.andThen((raw) => {
+      let body: Result<Js.Object, Js.Error> = raw :> Json.assert;
+      body :> Task.fromResult
+    })
+  };
+
+  Task.succeed((base, accessToken, nsid, params))
+    :> buildUrlT
+    :> request
+    :> inspectStatus
+    :> requireOk
+    :> readBody
+};
+
+let decodeProfileT = Monad.liftError Task Xrpc.ResponseShapeFailure (body) => {
+  Views.decodeProfile(body) :> Task.fromResult
+};
+
+let decodeAuthorFeedT = Monad.liftError Task Xrpc.ResponseShapeFailure (body) => {
+  Views.decodeAuthorFeed(body) :> Task.fromResult
+};
+
+let decodeSearchT = Monad.liftError Task Xrpc.ResponseShapeFailure (body) => {
+  Views.decodeSearch(body) :> Task.fromResult
+};
+
+let decodeThreadT = Monad.liftError Task Xrpc.ResponseShapeFailure (body) => {
+  Views.decodeThread(body) :> Task.fromResult
+};
+
+let profile = (actor) => {
+  query(
+    Xrpc.appView,
+    None,
+    "app.bsky.actor.getProfile",
+    [Xrpc.QueryParam("actor", actor)],
+  ) :> decodeProfileT
+};
+
+let cursorParams = match(cursor) => {
+  None => { [] },
+  Some(value) => { [Xrpc.QueryParam("cursor", value)] },
+};
+
+let authorFeedPage = (actor, limit, cursor) => {
+  query(
+    Xrpc.appView,
+    None,
+    "app.bsky.feed.getAuthorFeed",
+    List.append(
+      [
+        Xrpc.QueryParam("actor", actor),
+        Xrpc.QueryParam("limit", Result.textOf(limit)),
+        Xrpc.QueryParam("filter", "posts_with_replies"),
+        Xrpc.QueryParam("includePins", "false"),
+      ],
+      cursorParams(cursor),
+    ),
+  ) :> decodeAuthorFeedT
+};
+
+let authorFeed = (actor, limit) => {
+  authorFeedPage(actor, limit, None)
+};
+
+let timelinePage = (accessJwt, limit, cursor) => {
+  query(
+    "https://bsky.social",
+    Some(accessJwt),
+    "app.bsky.feed.getTimeline",
+    List.append(
+      [Xrpc.QueryParam("limit", Result.textOf(limit))],
+      cursorParams(cursor),
+    ),
+  ) :> decodeAuthorFeedT
+};
+
+let searchPosts = (term, limit) => {
+  query(
+    Xrpc.appView,
+    None,
+    "app.bsky.feed.searchPosts",
+    [
+      Xrpc.QueryParam("q", term),
+      Xrpc.QueryParam("sort", "latest"),
+      Xrpc.QueryParam("limit", Result.textOf(limit)),
+    ],
+  ) :> decodeSearchT
+};
+
+let searchPostsAuthenticated = (session, term, limit) => {
+  query(
+    "https://bsky.social",
+    Some(session.accessJwt),
+    "app.bsky.feed.searchPosts",
+    [
+      Xrpc.QueryParam("q", term),
+      Xrpc.QueryParam("sort", "latest"),
+      Xrpc.QueryParam("limit", Result.textOf(limit)),
+    ],
+  ) :> decodeSearchT
+};
+
+let thread = (uri, depth) => {
+  query(
+    Xrpc.appView,
+    None,
+    "app.bsky.feed.getPostThread",
+    [
+      Xrpc.QueryParam("uri", uri),
+      Xrpc.QueryParam("depth", Result.textOf(depth)),
+      Xrpc.QueryParam("parentHeight", "0"),
+    ],
+  ) :> decodeThreadT
+};
+
+let threadAuthenticated = (accessJwt, uri, depth) => {
+  query(
+    "https://bsky.social",
+    Some(accessJwt),
+    "app.bsky.feed.getPostThread",
+    [
+      Xrpc.QueryParam("uri", uri),
+      Xrpc.QueryParam("depth", Result.textOf(depth)),
+      Xrpc.QueryParam("parentHeight", "0"),
+    ],
+  ) :> decodeThreadT
+};
+
+let loadOwnFeed = (limit) => {
+  Auth.login() :> Task.andThen((session) => {
+    authorFeedPage(session.handle, limit, None) :> Task.map((feed) => {
+      OwnFeed(session.handle, session.did, feed.posts :> List.map(feedPost))
+    })
+  })
+};
+
+let loadAppFeeds = (limit) => {
+  Auth.login() :> Task.andThen((session) => {
+    Task|
+      timelinePage(session.accessJwt, limit, None),
+      authorFeedPage(session.handle, limit, None)
+    | :> Task.map((home, own) => {
+      AppFeeds(
+        session.handle,
+        session.did,
+        session.accessJwt,
+        home.posts :> List.map(feedPost),
+        own.posts :> List.map(feedPost),
+        home.cursor,
+        own.cursor,
+      )
+    })
+  })
+};
+
+let loadMoreTimeline = (feeds: AppFeeds, limit) => {
+  match(feeds.timelineCursor) {
+    None => { Task.succeed(FeedPage([], None)) },
+    Some(cursor) => {
+      timelinePage(feeds.accessJwt, limit, Some(cursor)) :> Task.map((page) => {
+        FeedPage(page.posts :> List.map(feedPost), page.cursor)
+      })
+    },
+  }
+};
+
+let loadMoreOwnPosts = (feeds: AppFeeds, limit) => {
+  match(feeds.ownCursor) {
+    None => { Task.succeed(FeedPage([], None)) },
+    Some(cursor) => {
+      authorFeedPage(feeds.handle, limit, Some(cursor)) :> Task.map((page) => {
+        FeedPage(page.posts :> List.map(feedPost), page.cursor)
+      })
+    },
+  }
+};
+
+let describeError = (error) => {
+  Xrpc.describeError(error)
+};

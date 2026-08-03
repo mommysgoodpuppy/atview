@@ -1,0 +1,222 @@
+from "../proto/api.wm" import * as Api;
+from "../proto/auth.wm" import * as Auth;
+from "../proto/views.wm" import * as Views;
+from "../proto/xrpc.wm" import * as Xrpc;
+from js.global("Deno") import {
+  args: Js.Array<String>,
+};
+  from js.global import {
+  Number as toNumber: String -> Number,
+};
+
+let usage = `atview — direct AT Protocol AppView CLI
+
+usage:
+  wm run app/cli.wm -- auth
+  wm run app/cli.wm -- refresh
+  wm run app/cli.wm -- profile <handle-or-did>
+  wm run app/cli.wm -- feed <handle-or-did> [limit]
+  wm run app/cli.wm -- thread <at-uri> [depth]
+  wm run app/cli.wm -- search <query> [limit]
+
+examples:
+  wm run app/cli.wm -- auth
+  wm run app/cli.wm -- profile atproto.com
+  wm run app/cli.wm -- feed atproto.com 5
+  wm run app/cli.wm -- thread at://did:plc:.../app.bsky.feed.post/... 3
+  wm run app/cli.wm -- search "workman language" 10`;
+
+let optionString = (fallback, value) => {
+  value :> Option.withDefault(fallback)
+};
+
+let optionNumber = (value) => {
+  value
+    :> Option.map(Result.textOf)
+    :> Option.withDefault("?")
+};
+
+let renderProfile = (profile) => {
+  let name = optionString(profile.handle, profile.displayName);
+  let description = optionString("(no description)", profile.description);
+  name ++ "  @" ++ profile.handle ++ "\n" ++
+    profile.did ++ "\n\n" ++
+    description ++ "\n\n" ++
+    optionNumber(profile.followersCount) ++ " followers  " ++
+    optionNumber(profile.followsCount) ++ " following  " ++
+    optionNumber(profile.postsCount) ++ " posts"
+};
+
+let renderPost = (post) => {
+  let name = optionString(post.author.handle, post.author.displayName);
+  name ++ "  @" ++ post.author.handle ++ "\n" ++
+    post.text ++ "\n" ++
+    post.createdAt ++ "\n" ++
+    optionNumber(post.replyCount) ++ " replies  " ++
+    optionNumber(post.repostCount) ++ " reposts  " ++
+    optionNumber(post.likeCount) ++ " likes\n" ++
+    post.uri
+};
+
+let rec joinBlocks = match(blocks) => {
+  [] => { "" },
+  [only] => { only },
+  [head, ..tail] => { head ++ "\n\n---\n\n" ++ joinBlocks(tail) },
+};
+
+let renderPosts = (posts) => {
+  posts
+    :> List.map(renderPost)
+    :> joinBlocks
+};
+
+let renderFeed = (feed) => {
+  let cursor = match(feed.cursor) {
+    Some(value) => { "\n\nnext cursor: " ++ value },
+    None => { "" },
+  };
+  renderPosts(feed.posts) ++ cursor
+};
+
+let renderSearch = (results) => {
+  let total = match(results.hitsTotal) {
+    Some(value) => { "reported hits: " ++ Result.textOf(value) ++ "\n\n" },
+    None => { "" },
+  };
+  let cursor = match(results.cursor) {
+    Some(value) => { "\n\nnext cursor: " ++ value },
+    None => { "" },
+  };
+  total ++ renderPosts(results.posts) ++ cursor
+};
+
+let rec indentation = (depth) => {
+  if (depth <= 0) {
+    ""
+  } else {
+    "  " ++ indentation(depth - 1)
+  }
+};
+
+let rec renderThreadAt = match(depth, thread) => {
+  (_, Views.ThreadPost(post, replies)) => {
+    let prefix = indentation(depth);
+    let name = optionString(post.author.handle, post.author.displayName);
+    let current = prefix ++ name ++ "  @" ++ post.author.handle ++ "\n" ++
+      prefix ++ post.text ++ "\n" ++
+      prefix ++ post.uri;
+    let children = replies
+      :> List.map((reply) => { renderThreadAt(depth + 1, reply) })
+      :> joinBlocks;
+    if (children == "") {
+      current
+    } else {
+      current ++ "\n\n" ++ children
+    }
+  },
+  (_, Views.MissingPost(uri)) => {
+    indentation(depth) ++ "[missing] " ++ uri
+  },
+  (_, Views.BlockedPost(uri)) => {
+    indentation(depth) ++ "[blocked] " ++ uri
+  },
+  (_, Views.UnknownThread(typeName)) => {
+    indentation(depth) ++ "[unknown thread variant] " ++ typeName
+  },
+};
+
+let renderThread = (thread) => {
+  renderThreadAt(0, thread)
+};
+
+let rec joinWords = match(words) => {
+  [] => { "" },
+  [only] => { only },
+  [head, ..tail] => { head ++ " " ++ joinWords(tail) },
+};
+
+let parseLimit = (text, fallback) => {
+  match(text) {
+    None => { Ok(fallback) },
+    Some(value) => { toNumber(value) },
+  }
+};
+
+let run = match(arguments) => {
+  ["auth"] => {
+    Auth.login() :> Task.map((session) => {
+      "authenticated as @" ++ session.handle ++ "\n" ++ session.did
+    })
+  },
+  ["refresh"] => {
+    Auth.login()
+      :> Task.andThen(Auth.refreshSession)
+      :> Task.map((session) => {
+        "refreshed session for @" ++ session.handle ++ "\n" ++ session.did
+      })
+  },
+  ["profile", actor] => {
+    Api.profile(actor) :> Task.map(renderProfile)
+  },
+  ["feed", actor] => {
+    Api.authorFeed(actor, 10) :> Task.map(renderFeed)
+  },
+  ["feed", actor, limitText] => {
+    parseLimit(Some(limitText), 10)
+      :> Task.fromResult
+      :> Task.mapErr(Xrpc.JavaScriptFailure)
+      :> Task.andThen((limit) => {
+        Api.authorFeed(actor, limit)
+      })
+      :> Task.map(renderFeed)
+  },
+  ["thread", uri] => {
+    Api.thread(uri, 4) :> Task.map(renderThread)
+  },
+  ["thread", uri, depthText] => {
+    parseLimit(Some(depthText), 4)
+      :> Task.fromResult
+      :> Task.mapErr(Xrpc.JavaScriptFailure)
+      :> Task.andThen((depth) => {
+        Api.thread(uri, depth)
+      })
+      :> Task.map(renderThread)
+  },
+  ["search", query] => {
+    Auth.login()
+      :> Task.andThen((session) => {
+        Api.searchPostsAuthenticated(session, query, 10)
+      })
+      :> Task.map(renderSearch)
+  },
+  ["search", query, limitText] => {
+    parseLimit(Some(limitText), 10)
+      :> Task.fromResult
+      :> Task.mapErr(Xrpc.JavaScriptFailure)
+      :> Task.andThen((limit) => {
+        Auth.login() :> Task.andThen((session) => {
+          Api.searchPostsAuthenticated(session, query, limit)
+        })
+      })
+      :> Task.map(renderSearch)
+  },
+  _ => {
+    Task.succeed(usage)
+  },
+};
+
+let main = () => {
+  match(args) {
+    Err(error) => {
+      Task.succeed(print("could not read arguments: " ++ Xrpc.describeJsError(error)))
+    },
+    Ok(values) => {
+      run(Js.Array.toList(values))
+        :> Task.map(print)
+        :> Task.recover((error) => {
+          print("atview: " ++ Xrpc.describeError(error));
+          void
+        })
+    },
+  }
+};

@@ -1,0 +1,224 @@
+-- Bluesky application model shared by loading, scheduling, updating, and rendering.
+
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../proto/xrpc.wm" import { AppError };
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/kitty.wm" import * as Kitty;
+
+type FeedView = Timeline | OwnPosts;
+
+type UiThread =
+  | UiThreadPost<Views.Post, Option<Kitty.Image>, List<UiThread>>
+  | UiMissingPost<String>
+  | UiBlockedPost<String>
+  | UiUnknownThread<String>;
+
+type ThreadModel =
+  | ThreadLoading<String>
+  | ThreadReady<String, UiThread>
+  | ThreadFailed<String, String>;
+
+type ThreadResource =
+  | ThreadPending
+  | ThreadCached<UiThread>
+  | ThreadCacheFailed<String>;
+
+record ThreadNode = {
+  uri: String,
+  resource: ThreadResource,
+};
+
+record UiPost = {
+  post: FeedPost,
+  image: Option<Kitty.Image>,
+  avatar: Option<Kitty.Image>,
+};
+
+record UiFeeds = {
+  handle: String,
+  did: String,
+  accessJwt: String,
+  timelinePosts: List<UiPost>,
+  ownPosts: List<UiPost>,
+  timelineCursor: Option<String>,
+  ownCursor: Option<String>,
+};
+
+record UiState = {
+  selected: Number,
+  view: FeedView,
+  imageScale: Kitty.Scale,
+  feeds: UiFeeds,
+  loading: Bool,
+  status: String,
+  renderVersion: Number,
+  thread: ThreadModel,
+  threadGraph: List<ThreadNode>,
+};
+
+record FeedLayout = {
+  width: Number,
+  size: Geometry.Size,
+  scale: Kitty.Scale,
+};
+
+record WindowLayout = {
+  width: Number,
+  height: Number,
+  size: Geometry.Size,
+  scale: Kitty.Scale,
+};
+
+record CardCursor = {
+  selected: Number,
+  index: Number,
+};
+
+record PostRows = {
+  first: String,
+  second: String,
+};
+
+record PaneLayout = {
+  feed: Geometry.Rect,
+  thread: Geometry.Rect,
+};
+
+record ReplyCursor = {
+  depth: Number,
+  row: Number,
+  imageId: Number,
+};
+
+record BoundedThreadNodes = {
+  nodes: List<Views.Thread>,
+  remaining: Number,
+};
+
+record PrefetchPlan = {
+  state: UiState,
+  tasks: List<Task<UiState -> UiState, AppError>>,
+};
+
+record GraphCounts = {
+  ready: Number,
+  pending: Number,
+};
+
+record BorderRender = {
+  cursor: CardCursor,
+  layout: FeedLayout,
+  target: Number,
+  active: Bool,
+  standalone: Bool,
+};
+
+record FeedRegion = {
+  renderVersion: Number,
+  start: Number,
+  size: Geometry.Size,
+};
+
+record SelectionRegion = {
+  selected: Number,
+  start: Number,
+};
+
+record ThreadRegion = {
+  selected: Number,
+  renderVersion: Number,
+  imageScale: Kitty.Scale,
+  threadKey: String,
+  size: Geometry.Size,
+};
+
+record FooterRegion = {
+  selected: Number,
+  count: Number,
+  view: FeedView,
+  loading: Bool,
+  status: String,
+  graphReady: Number,
+  graphPending: Number,
+  size: Geometry.Size,
+};
+
+type RenderDependency =
+  | SelectionSurface
+  | ThreadSurface
+  | FooterSurface;
+
+record RenderModel = {
+  state: UiState,
+  size: Geometry.Size,
+  start: Number,
+};
+
+let rec graphCounts = match(graph) => {
+  [] => { GraphCounts(0, 0) },
+  [node, ..rest] => {
+    let tail = graphCounts(rest);
+    match(node.resource) {
+      ThreadPending => {
+        GraphCounts(tail.ready, tail.pending + 1)
+      },
+      ThreadCached(_) => {
+        GraphCounts(tail.ready + 1, tail.pending)
+      },
+      ThreadCacheFailed(_) => {
+        GraphCounts(tail.ready, tail.pending)
+      },
+    }
+  },
+};
+
+let panes = (body, size) => {
+  let requested = Geometry.aspectColumns(body.height, size, 9, 19.5);
+  let leftWidth = if (body.width < 56 || requested <= 0) {
+    Geometry.percentOf(body.width, 48)
+  } else {
+    Geometry.clamp(20, body.width - 31, requested)
+  };
+  let (feed, thread) = Geometry.splitColumns(body, leftWidth, 1);
+  PaneLayout(feed, thread)
+};
+
+let countText = (value) => {
+  value :> Option.map(Result.textOf) :> Option.withDefault("0")
+};
+
+let move = (count, delta, state) => {
+  let selected = Geometry.clamp(0, count - 1, state.selected + delta);
+  UiState(
+    selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    state.threadGraph,
+  )
+};
+
+let toggleImageScale = match(scale) => {
+  Kitty.Fit => { Kitty.Fill },
+  Kitty.Fill => { Kitty.Fit },
+};
+
+let imageScaleName = match(scale) => {
+  Kitty.Fit => { "fit" },
+  Kitty.Fill => { "fill" },
+};
+
+let postsFor = match(feeds, view) => {
+  (_, Timeline) => { feeds.timelinePosts },
+  (_, OwnPosts) => { feeds.ownPosts },
+};
+
+let titleFor = match(feeds, view) => {
+  (_, Timeline) => { "timeline" },
+  (_, OwnPosts) => { "@" ++ feeds.handle },
+};

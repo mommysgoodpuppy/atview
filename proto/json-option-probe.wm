@@ -1,0 +1,35 @@
+-- Reduction for JSON Option adaptation behavior.
+
+from js.global("JSON") import {
+  parse: String -> Js.Object,
+} as JSON;
+
+record Payload = {
+  required: String,
+  optional: Option<String>,
+};
+
+let describe = (label, parsed) => {
+  let payload: Result<Payload, Js.Error> = parsed :> Result.andThen(Json.assert);
+  match(payload) {
+    Ok(value) => {
+      print(label ++ ": ok");
+      match(value.optional) {
+        Some(text) => { print("Some(" ++ text ++ ")") },
+        None => { print("None") },
+      }
+    },
+    Err(Js.Error(message)) => {
+      print(label ++ ": " ++ message)
+    },
+    Err(Js.Unknown) => {
+      print(label ++ ": unknown error")
+    },
+  }
+};
+
+let main = () => {
+  describe("missing", JSON.parse("{\"required\":\"yes\"}"));
+  describe("present", JSON.parse("{\"required\":\"yes\",\"optional\":\"hello\"}"));
+  describe("null", JSON.parse("{\"required\":\"yes\",\"optional\":null}"))
+};
