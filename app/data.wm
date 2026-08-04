@@ -64,6 +64,135 @@ let loadUiFeeds = (feeds: AppFeeds) => {
   })
 };
 
+-- First paint must not wait on media. Posts start with no image or avatar and
+-- are filled in by background tasks, each of which resolves to a state update
+-- keyed by post uri, the same shape the thread prefetch already uses.
+let rec pendingPosts = match(posts) => {
+  [] => { [] },
+  [post, ..tail] => {
+    let feedPost: FeedPost = post;
+    [UiPost(feedPost, None, None), ..pendingPosts(tail)]
+  },
+};
+
+let uiFeedsPending = (feeds: AppFeeds) => {
+  UiFeeds(
+    feeds.handle,
+    feeds.did,
+    feeds.accessJwt,
+    pendingPosts(feeds.timelinePosts),
+    pendingPosts(feeds.ownPosts),
+    feeds.timelineCursor,
+    feeds.ownCursor,
+  )
+};
+
+let rec republishPost = match(posts, uri, image, avatar) => {
+  ([], _, _, _) => { [] },
+  ([post, ..tail], _, _, _) => {
+    let current: UiPost = post;
+    if (current.post.uri == uri) {
+      -- Media already present wins, so a later empty result cannot clear it.
+      let nextImage = match(current.image) {
+        Some(existing) => { Some(existing) },
+        None => { image },
+      };
+      let nextAvatar = match(current.avatar) {
+        Some(existing) => { Some(existing) },
+        None => { avatar },
+      };
+      [UiPost(current.post, nextImage, nextAvatar), ..tail]
+    } else {
+      [current, ..republishPost(tail, uri, image, avatar)]
+    }
+  },
+};
+
+let publishPostMedia = (state: UiState, uri, image, avatar) => {
+  let feeds: UiFeeds = state.feeds;
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    UiFeeds(
+      feeds.handle,
+      feeds.did,
+      feeds.accessJwt,
+      republishPost(feeds.timelinePosts, uri, image, avatar),
+      republishPost(feeds.ownPosts, uri, image, avatar),
+      feeds.timelineCursor,
+      feeds.ownCursor,
+    ),
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    state.threadGraph,
+  )
+};
+
+let postMediaTask = (post: UiPost, wantImage) => {
+  let feedPost: FeedPost = post.post;
+  let imageTask = if (wantImage) {
+    match(feedPost.image) {
+      None => { Task.succeed(None) },
+      Some(source) => {
+        let typedSource: Views.PostImage = source;
+        Kitty.load(typedSource) :> Task.map(Some) :> Task.recover((_) => { None })
+      },
+    }
+  } else {
+    Task.succeed(None)
+  };
+  let avatarTask = match(feedPost.avatar) {
+    None => { Task.succeed(None) },
+    Some(url) => {
+      Kitty.loadAvatar(url) :> Task.map(Some) :> Task.recover((_) => { None })
+    },
+  };
+  Task|
+    imageTask,
+    avatarTask
+  | :> Task.map((image, avatar) => {
+    (current: UiState) => { publishPostMedia(current, feedPost.uri, image, avatar) }
+  })
+};
+
+let rec mediaTasksFor = match(posts, images) => {
+  ([], _) => { [] },
+  ([post, ..tail], _) => {
+    let current: UiPost = post;
+    let feedPost: FeedPost = current.post;
+    let hasMedia = match(current.image) {
+      Some(_) => { true },
+      None => {
+        match(current.avatar) {
+          Some(_) => { true },
+          None => { false },
+        }
+      },
+    };
+    let wantImage = if (images <= 0) { false } else { true };
+    let nextImages = match(feedPost.image) {
+      Some(_) => { if (images <= 0) { 0 } else { images - 1 } },
+      None => { images },
+    };
+    if (hasMedia) {
+      mediaTasksFor(tail, nextImages)
+    } else {
+      [postMediaTask(current, wantImage), ..mediaTasksFor(tail, nextImages)]
+    }
+  },
+};
+
+let feedMediaTasks = (state: UiState) => {
+  let feeds: UiFeeds = state.feeds;
+  List.append(
+    mediaTasksFor(feeds.timelinePosts, 3),
+    mediaTasksFor(feeds.ownPosts, 3),
+  )
+};
+
 let apiFeeds = (feeds: UiFeeds) => {
   AppFeeds(
     feeds.handle,

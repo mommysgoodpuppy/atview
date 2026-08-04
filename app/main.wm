@@ -11,7 +11,7 @@ from "../tui/kitty.wm" import * as Kitty;
 from "../tui/reactive.wm" import * as Reactive;
 from "../tui/runtime.wm" import * as Runtime;
 from "../tui/surface.wm" import * as Surface;
-from "./data.wm" import { loadUiFeeds };
+from "./data.wm" import { feedMediaTasks, uiFeedsPending };
 from "./graph.wm" import { buildPrefetchPlan, scheduleThreadPrefetch };
 from "./model.wm" import {
   RenderDependency,
@@ -37,9 +37,11 @@ let startFeeds = (feeds: UiFeeds) => {
     [],
   );
   let plan = buildPrefetchPlan(initial);
+  -- Media is fetched after the first frame, not before it.
+  let startupTasks = List.append(plan.tasks, feedMediaTasks(plan.state));
   let started = Runtime.runRetainedManaged(
     plan.state,
-    plan.tasks,
+    startupTasks,
     (state: UiState) => { scheduleThreadPrefetch(state) },
     (key, state: UiState) => { updateState(key, state) },
     (previous, state: UiState, size: Geometry.Size) => {
@@ -51,7 +53,7 @@ let startFeeds = (feeds: UiFeeds) => {
 
 let main = () => {
   loadAppFeeds(30)
-    :> Task.andThen(loadUiFeeds)
+    :> Task.map(uiFeedsPending)
     :> Task.andThen(startFeeds)
     :> Task.recover((error) => {
       print("atview tui: " ++ describeError(error));
