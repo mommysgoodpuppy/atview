@@ -30,14 +30,14 @@ record Placement = {
 };
 
 let apc = (control, payload) => {
-  Ansi.esc ++ "_G" ++ control ++ ";" ++ payload ++ Ansi.esc ++ "\\"
+  `${Ansi.esc}_G${control};${payload}${Ansi.esc}\\`
 };
 
 let deleteAll = apc("a=d,d=A,q=2", "");
 
 let deleteImage = (identifier) => {
   apc(
-    "a=d,d=I,i=" ++ Result.textOf(identifier) ++ ",q=2",
+    `a=d,d=I,i=${Result.textOf(identifier)},q=2`,
     "",
   )
 };
@@ -49,15 +49,15 @@ let rec transmitChunks = (remaining, first, placement, identifier) => {
   let rest = remaining :> .slice(4096) :> Result.withDefault("");
   let continuation = if (more) { "1" } else { "0" };
   let control = if (first) {
-    "a=T,f=100,q=2,C=1," ++
-      (if (identifier > 0) {
-        "i=" ++ Result.textOf(identifier) ++ ","
+    `a=T,f=100,q=2,C=1,${
+      if (identifier > 0) {
+        `i=${Result.textOf(identifier)},`
       } else {
         ""
-      }) ++
-      placement.control ++ ",m=" ++ continuation
+      }
+    }${placement.control},m=${continuation}`
   } else {
-    "q=2,m=" ++ continuation
+    `q=2,m=${continuation}`
   };
   apc(control, chunk) ++
     (if (more) {
@@ -103,8 +103,7 @@ let fitPlacement = (area: Geometry.Rect, terminal: Geometry.Size, image: Image) 
       roundedDown((area.height - rows) / 2),
       area.width,
       rows,
-      "c=" ++ Result.textOf(area.width) ++
-        ",r=" ++ Result.textOf(rows),
+      `c=${Result.textOf(area.width)},r=${Result.textOf(rows)}`,
     )
   } else {
     let columns = Geometry.clamp(
@@ -117,8 +116,7 @@ let fitPlacement = (area: Geometry.Rect, terminal: Geometry.Size, image: Image) 
       0,
       columns,
       area.height,
-      "c=" ++ Result.textOf(columns) ++
-        ",r=" ++ Result.textOf(area.height),
+      `c=${Result.textOf(columns)},r=${Result.textOf(area.height)}`,
     )
   }
 };
@@ -153,13 +151,11 @@ let fillPlacement = (area: Geometry.Rect, terminal: Geometry.Size, image: Image)
         cropHeight,
       )
     };
-  let control =
-    "x=" ++ Result.textOf(sourceX) ++
-    ",y=" ++ Result.textOf(sourceY) ++
-    ",w=" ++ Result.textOf(sourceWidth) ++
-    ",h=" ++ Result.textOf(sourceHeight) ++
-    ",c=" ++ Result.textOf(area.width) ++
-    ",r=" ++ Result.textOf(area.height);
+  let control = `x=${Result.textOf(sourceX)},y=${Result.textOf(sourceY)},w=${
+    Result.textOf(sourceWidth)
+  },h=${Result.textOf(sourceHeight)},c=${Result.textOf(area.width)},r=${
+    Result.textOf(area.height)
+  }`;
   Placement(0, 0, area.width, area.height, control)
 };
 
@@ -203,9 +199,9 @@ let pngUrl = (url) => {
       Ok(url)
     } else {
       if (jpeg || webp) {
-        url :> .slice(0, -5) :> Result.map((base) => { base ++ "@png" })
+        url :> .slice(0, -5) :> Result.map((base) => { `${base}@png` })
       } else {
-        Ok(url ++ "@png")
+        Ok(`${url}@png`)
       }
     }
   }) :> Result.withDefault(url)
