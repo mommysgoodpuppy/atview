@@ -7,9 +7,9 @@ from "./kitty.wm" import * as Kitty;
 
 let terminal = Geometry.Size(80, 24, 10, 20);
 let area = Geometry.rect(4, 3, 40, 8);
-let wide = Kitty.Image("AA==", "wide", 2000, 500);
-let landscape = Kitty.Image("AA==", "landscape", 1000, 500);
-let portrait = Kitty.Image("AA==", "portrait", 500, 1000);
+let wide = Kitty.Image("AA==", "wide", 2000, 500, None);
+let landscape = Kitty.Image("AA==", "landscape", 1000, 500, None);
+let portrait = Kitty.Image("AA==", "portrait", 500, 1000, None);
 
 let main = () => {
   print(Kitty.render(area, terminal, Kitty.Fit, wide));

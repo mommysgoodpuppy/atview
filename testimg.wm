@@ -1,0 +1,56 @@
+from "./proto/api.wm" import { thread };
+from "./proto/views.wm" import { PostImage, Thread, ThreadPost };
+from "./proto/xrpc.wm" import { AppError, ConfigFailure, describeError };
+from "./tui/ansi.wm" import * as Ansi;
+from "./tui/command.wm" import * as Command;
+from "./tui/draw.wm" import * as Draw;
+from "./tui/element.wm" import * as Ui;
+from "./tui/event.wm" import * as Event;
+from "./tui/geometry.wm" import * as Geometry;
+from "./tui/kitty.wm" import * as Kitty;
+from "./tui/runtime.wm" import * as Runtime;
+
+let uri = "at://sadlyitsbradleybot.bsky.social/app.bsky.feed.post/3mruickdkdr2c";
+
+let postImage = (value: Thread) => {
+  match(value) {
+    ThreadPost(post, _) => { post.image },
+    _ => { None },
+  }
+};
+
+let loadImage = () => {
+  thread(uri, 0) :> Task.andThen((value) => {
+    match(postImage(value)) {
+      None => { Task.fail(ConfigFailure("post has no image")) },
+      Some(image) => { Kitty.loadPng(image.fullsize, image.alt) },
+    }
+  })
+};
+
+let update = match(key, image) => {
+  (Event.Character("q"), _) => { Command.Quit },
+  (Event.CtrlC, _) => { Command.Quit },
+  _ => { Command.Continue(image) },
+};
+
+let render = (_, image, size: Geometry.Size) => {
+  let area = Geometry.screen(size);
+  Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
+    Ui.render(size, Ui.image(1, area, Kitty.Fit, image)) ++
+    Draw.endFrame ++ Ansi.endSynchronizedUpdate
+};
+
+let display = (image: Kitty.Image) => {
+  let started = Runtime.run(image, update, render);
+  Task.succeed(started)
+};
+
+let main = () => {
+  loadImage()
+    :> Task.andThen(display)
+    :> Task.recover((error) => {
+      print(`testimg: ${describeError(error)}`);
+      void
+    })
+};

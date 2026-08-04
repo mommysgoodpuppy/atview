@@ -6,7 +6,9 @@
 
 from "./draw.wm" import * as Draw;
 from "./geometry.wm" import * as Geometry;
+from "./halfblock.wm" import * as HalfBlock;
 from "./kitty.wm" import * as Kitty;
+from "./terminal-cap.wm" import * as Cap;
 
 type Element =
   | Empty
@@ -84,6 +86,9 @@ let rec render = match(terminal, element) => {
     Draw.timelineBox(area, active, joinedTop, joinedBottom)
   },
   (_, Image(identifier, area, scale, value)) => {
-    Kitty.renderWithId(identifier, area, terminal, scale, value)
+    match(Cap.backend) {
+      Cap.KittyGraphics => { Kitty.renderWithId(identifier, area, terminal, scale, value) },
+      Cap.HalfBlock => { HalfBlock.render(area, scale, value) },
+    }
   },
 };

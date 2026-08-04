@@ -1,0 +1,76 @@
+from "../proto/api.wm" import { thread };
+from "../proto/views.wm" import { Thread, ThreadPost };
+from "../proto/xrpc.wm" import { AppError, ConfigFailure, JavaScriptFailure, describeError };
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/halfblock.wm" import * as HalfBlock;
+from "../tui/kitty.wm" import * as Kitty;
+from "../tui/png.wm" import * as Png;
+from "../tui/png-jsr.wm" import * as PngJsr;
+from "./benchmark.wm" import * as Benchmark;
+from js.module("node:buffer") import { Buffer };
+
+let uri = "at://sadlyitsbradleybot.bsky.social/app.bsky.feed.post/3mruickdkdr2c";
+let area = Geometry.rect(0, 0, 80, 24);
+
+let postImage = (value: Thread) => {
+  match(value) {
+    ThreadPost(post, _) => { post.image },
+    _ => { None },
+  }
+};
+
+let load = () => {
+  thread(uri, 0) :> Task.andThen((value) => {
+    match(postImage(value)) {
+      None => { Task.fail(ConfigFailure("post has no image")) },
+      Some(image) => { Kitty.loadPng(image.fullsize, image.alt) },
+    }
+  })
+};
+
+let suite = (image: Kitty.Image) => {
+  match(image.pixels) {
+    None => { Task.fail(ConfigFailure("decoded pixels missing")) },
+    Some(pixels) => {
+      match(Buffer.from(image.base64, "base64")) {
+        Err(error) => { Task.fail(JavaScriptFailure(error)) },
+        Ok(buffer) => {
+          Benchmark.measureTaskWith(
+            "@img/png decode",
+            Benchmark.Config(1, 5, 1),
+            () => { PngJsr.decode(buffer) },
+            pixels,
+          ) :> Task.mapErr(JavaScriptFailure) :> Task.map((jsrOutcome) => {
+            let manual = Benchmark.measureWith(
+              "manual Workman decode",
+              Benchmark.Config(0, 1, 1),
+              () => { Png.decode(image.base64) },
+              Ok(pixels),
+            ) :> Benchmark.map((_) => { void });
+            let cached = Benchmark.measure(
+              "half-block cached pixels",
+              () => { HalfBlock.renderPixels(area, Kitty.Fit, pixels) },
+              "",
+            );
+            let complete = Benchmark.measure(
+              "half-block cached image render",
+              () => { HalfBlock.render(area, Kitty.Fit, image) },
+              "",
+            );
+            let outcome = Benchmark.runWith(Benchmark.Config(1, 5, 1), Benchmark|manual, cached, complete|);
+            print(Benchmark.format(List.append(jsrOutcome.reports, outcome.reports)))
+          })
+        },
+      }
+    },
+  }
+};
+
+let main = () => {
+  load()
+    :> Task.andThen(suite)
+    :> Task.recover((error) => {
+      print(`image benchmark: ${describeError(error)}`);
+      void
+    })
+};

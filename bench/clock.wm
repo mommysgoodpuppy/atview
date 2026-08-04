@@ -1,0 +1,5 @@
+from js.global("performance") import unsafe * as Performance;
+
+let now = () => {
+  Performance.now()
+};

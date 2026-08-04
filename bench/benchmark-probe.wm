@@ -1,0 +1,26 @@
+from "./benchmark.wm" import * as Benchmark;
+
+let increment = Monad.lift Benchmark (value) => {
+  Benchmark.measure("increment", () => { value + 1 }, value)
+};
+
+let double = Monad.lift Benchmark (value) => {
+  Benchmark.measure("double", () => { value * 2 }, value)
+};
+
+let main = () => {
+  let plan = Benchmark.succeed(1) :> increment :> double;
+  let paired = Benchmark|
+    Benchmark.succeed("left"),
+    Benchmark.succeed(2)
+  |;
+  let outcome = Benchmark.runWith(Benchmark.Config(1, 5, 100), plan);
+  let pairOutcome = Benchmark.run(paired);
+  let (left, right) = pairOutcome.value;
+  if (outcome.value == 4 && List.length(outcome.reports) == 2 && left == "left" && right == 2) {
+    print("benchmark carrier ok");
+    print(Benchmark.format(outcome.reports))
+  } else {
+    print("benchmark carrier mismatch")
+  }
+};

@@ -1,0 +1,225 @@
+from "./clock.wm" import * as Clock;
+from js.global("Math") import { floor };
+
+record Config = {
+  warmup: Number,
+  samples: Number,
+  iterations: Number,
+};
+
+record Report = {
+  name: String,
+  samples: Number,
+  iterations: Number,
+  minimumMs: Number,
+  medianMs: Number,
+  meanMs: Number,
+  maximumMs: Number,
+  operationsPerSecond: Number,
+};
+
+record Outcome<Value> = {
+  value: Value,
+  reports: List<Report>,
+};
+
+record Benchmark<Value> = {
+  run: Config -> Outcome<Value>,
+};
+
+let defaults = Config(2, 10, 1);
+
+let succeed = (value) => {
+  Benchmark((_) => { Outcome(value, []) })
+};
+
+let map = (benchmark, transform) => {
+  Benchmark((config) => {
+    let outcome = benchmark.run(config);
+    Outcome(transform(outcome.value), outcome.reports)
+  })
+};
+
+let andThen = (benchmark, transform) => {
+  Benchmark((config) => {
+    let first = benchmark.run(config);
+    let next = transform(first.value);
+    let second = next.run(config);
+    Outcome(second.value, List.append(first.reports, second.reports))
+  })
+};
+
+let map2 = (left, right, combine) => {
+  left :> andThen((leftValue) => {
+    right :> map((rightValue) => { combine(leftValue, rightValue) })
+  })
+};
+
+let fn = (transform) => {
+  (benchmark) => { benchmark :> andThen(transform) }
+};
+
+let fnError = (_) => {
+  (transform) => { fn(transform) }
+};
+
+let carrier = .{
+  fn = fn,
+  fnError = fnError,
+  succeed = succeed,
+  map = map,
+  map2 = map2,
+  andThen = andThen,
+};
+
+let rec repeat = (remaining, action, last) => {
+  if (remaining <= 0) {
+    last
+  } else {
+    repeat(remaining - 1, action, action())
+  }
+};
+
+let rec warm = (remaining, action) => {
+  if (remaining <= 0) {
+    void
+  } else {
+    let _ = action();
+    warm(remaining - 1, action)
+  }
+};
+
+let rec insert = match(value, sorted) => {
+  (_, []) => { [value] },
+  (_, [head, ..tail]) => {
+    if (value <= head) { [value, head, ..tail] } else { [head, ..insert(value, tail)] }
+  },
+};
+
+let rec sort = match(values) => {
+  [] => { [] },
+  [head, ..tail] => { insert(head, sort(tail)) },
+};
+
+let rec total = match(values) => {
+  [] => { 0 },
+  [head, ..tail] => { head + total(tail) },
+};
+
+let rec count = match(values) => {
+  [] => { 0 },
+  [_, ..tail] => { 1 + count(tail) },
+};
+
+let rec at = match(values, index) => {
+  ([], _) => { 0 },
+  ([head, .._], 0) => { head },
+  ([_head, ..tail], _) => { at(tail, index - 1) },
+};
+
+let median = (sorted, size) => {
+  if (size <= 0) {
+    0
+  } else {
+    let half = floor(size / 2) :> Result.withDefault(0);
+    if (size - half * 2 == 0) {
+      let right = half;
+      (at(sorted, right - 1) + at(sorted, right)) / 2
+    } else {
+      at(sorted, floor(size / 2) :> Result.withDefault(0))
+    }
+  }
+};
+
+let rec collect = (remaining, iterations, action, durations, last) => {
+  if (remaining <= 0) {
+    (durations, last)
+  } else {
+    let started = Clock.now();
+    let value = repeat(iterations, action, last);
+    let elapsed = Clock.now() - started;
+    collect(remaining - 1, iterations, action, [elapsed, ..durations], value)
+  }
+};
+
+let measureWith = (name, requested: Config, action, initial) => {
+  Benchmark((outer: Config) => {
+    let warmup = if (requested.warmup >= 0) { requested.warmup } else { outer.warmup };
+    let samples = if (requested.samples > 0) { requested.samples } else { outer.samples };
+    let iterations = if (requested.iterations > 0) { requested.iterations } else { outer.iterations };
+    let _ = warm(warmup, action);
+    let (durations, value) = collect(samples, iterations, action, [], initial);
+    let sorted = sort(durations);
+    let size = count(sorted);
+    let sum = total(sorted);
+    let mean = if (size > 0) { sum / size } else { 0 };
+    let operations = size * iterations;
+    let rate = if (sum > 0) { operations * 1000 / sum } else { 0 };
+    Outcome(
+      value,
+      [Report(name, size, iterations, at(sorted, 0), median(sorted, size), mean, at(sorted, size - 1), rate)],
+    )
+  })
+};
+
+let measure = (name, action, initial) => {
+  measureWith(name, Config(-1, 0, 0), action, initial)
+};
+
+let rec warmTask = (remaining, action) => {
+  if (remaining <= 0) {
+    Task.succeed(void)
+  } else {
+    action() :> Task.andThen((_) => { warmTask(remaining - 1, action) })
+  }
+};
+
+let rec collectTask = (remaining, action, durations, last) => {
+  if (remaining <= 0) {
+    Task.succeed((durations, last))
+  } else {
+    let started = Clock.now();
+    action() :> Task.andThen((value) => {
+      collectTask(remaining - 1, action, [Clock.now() - started, ..durations], value)
+    })
+  }
+};
+
+let measureTaskWith = (name, config: Config, action, initial) => {
+  warmTask(config.warmup, action) :> Task.andThen((_) => {
+    collectTask(config.samples, action, [], initial) :> Task.map((durations, value) => {
+      let sorted = sort(durations);
+      let size = count(sorted);
+      let sum = total(sorted);
+      let mean = if (size > 0) { sum / size } else { 0 };
+      let rate = if (sum > 0) { size * 1000 / sum } else { 0 };
+      Outcome(value, [Report(name, size, 1, at(sorted, 0), median(sorted, size), mean, at(sorted, size - 1), rate)])
+    })
+  })
+};
+
+let measureTask = (name, action, initial) => {
+  measureTaskWith(name, defaults, action, initial)
+};
+
+let runWith = (config, benchmark) => {
+  benchmark.run(config)
+};
+
+let run = (benchmark) => {
+  runWith(defaults, benchmark)
+};
+
+let fixed = (value, digits) => {
+  value :> .toFixed(digits) :> Result.withDefault("?")
+};
+
+let formatReport = (report: Report) => {
+  `${report.name}: median ${fixed(report.medianMs, 3)} ms  mean ${fixed(report.meanMs, 3)} ms  range ${fixed(report.minimumMs, 3)}–${fixed(report.maximumMs, 3)} ms  ${fixed(report.operationsPerSecond, 1)} ops/s`
+};
+
+let rec format = match(reports) => {
+  [] => { "" },
+  [report] => { formatReport(report) },
+  [report, ..rest] => { `${formatReport(report)}\n${format(rest)}` },
+};

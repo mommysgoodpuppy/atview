@@ -5,7 +5,9 @@
 
 from "./draw.wm" import * as Draw;
 from "./geometry.wm" import * as Geometry;
+from "./halfblock.wm" import * as HalfBlock;
 from "./kitty.wm" import * as Kitty;
+from "./terminal-cap.wm" import * as Cap;
 
 type Command =
   | Raw<String>
@@ -27,10 +29,23 @@ let rec encode = match(commands, terminal) => {
       Raw(value) => { value },
       Text(area, value, style) => { Draw.text(area, value, style) },
       Fill(area, symbol, style) => { Draw.fill(area, symbol, style) },
-      DeleteAllImages => { Kitty.deleteAll },
-      DeleteImage(identifier) => { Kitty.deleteImage(identifier) },
+      DeleteAllImages => {
+        match(Cap.backend) {
+          Cap.KittyGraphics => { Kitty.deleteAll },
+          Cap.HalfBlock => { "" },
+        }
+      },
+      DeleteImage(identifier) => {
+        match(Cap.backend) {
+          Cap.KittyGraphics => { Kitty.deleteImage(identifier) },
+          Cap.HalfBlock => { "" },
+        }
+      },
       PlaceImage(identifier, area, scale, image) => {
-        Kitty.renderWithId(identifier, area, terminal, scale, image)
+        match(Cap.backend) {
+          Cap.KittyGraphics => { Kitty.renderWithId(identifier, area, terminal, scale, image) },
+          Cap.HalfBlock => { HalfBlock.render(area, scale, image) },
+        }
       },
     };
     output ++ encode(tail, terminal)
