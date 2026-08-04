@@ -47,6 +47,10 @@ let withThreadGraph = (state: UiState, graph) => {
     state.renderVersion,
     state.thread,
     graph,
+    state.scrolling,
+    state.scrollVersion,
+    state.scrollFrame,
+    state.scrollRows,
   )
 };
 

@@ -19,6 +19,8 @@ let input =
   Ansi.esc ++ "[F" ++
   Ansi.esc ++ "[4~" ++
   Ansi.esc ++ "[6;20;10t" ++
+  Ansi.esc ++ "[<64;10;5M" ++
+  Ansi.esc ++ "[<65;10;5M" ++
   "x" ++ controlC;
 
 let expected = match(events) => {
@@ -33,6 +35,8 @@ let expected = match(events) => {
     Event.End,
     Event.End,
     Event.CellSize(10, 20),
+    Event.WheelUp,
+    Event.WheelDown,
     Event.Character("x"),
     Event.CtrlC
   ] => { true },

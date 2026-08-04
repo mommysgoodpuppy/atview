@@ -5,6 +5,7 @@ from "../proto/views.wm" import * as Views;
 from "../proto/xrpc.wm" import { AppError };
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
+from "../tui/resource.wm" import * as Resource;
 
 type FeedView = Timeline | OwnPosts;
 
@@ -31,8 +32,8 @@ record ThreadNode = {
 
 record UiPost = {
   post: FeedPost,
-  image: Option<Kitty.Image>,
-  avatar: Option<Kitty.Image>,
+  image: Resource.Resource<String, Option<Kitty.Image>>,
+  avatar: Resource.Resource<String, Option<Kitty.Image>>,
 };
 
 record UiFeeds = {
@@ -55,6 +56,10 @@ record UiState = {
   renderVersion: Number,
   thread: ThreadModel,
   threadGraph: List<ThreadNode>,
+  scrolling: Bool,
+  scrollVersion: Number,
+  scrollFrame: Number,
+  scrollRows: Number,
 };
 
 record FeedLayout = {
@@ -101,6 +106,11 @@ record PrefetchPlan = {
   tasks: List<Task<UiState -> UiState, AppError>>,
 };
 
+record MediaPlan = {
+  state: UiState,
+  tasks: List<Task<UiState -> UiState, AppError>>,
+};
+
 record GraphCounts = {
   ready: Number,
   pending: Number,
@@ -116,7 +126,9 @@ record BorderRender = {
 
 record FeedRegion = {
   renderVersion: Number,
+  scrolling: Bool,
   start: Number,
+  scrollOffset: Number,
   size: Geometry.Size,
 };
 
@@ -127,9 +139,16 @@ record SelectionRegion = {
 
 record ThreadRegion = {
   selected: Number,
+  scrolling: Bool,
   renderVersion: Number,
   imageScale: Kitty.Scale,
   threadKey: String,
+  size: Geometry.Size,
+};
+
+record MediaRegion = {
+  scrolling: Bool,
+  start: Number,
   size: Geometry.Size,
 };
 
@@ -146,6 +165,7 @@ record FooterRegion = {
 
 type RenderDependency =
   | SelectionSurface
+  | MediaSurface
   | ThreadSurface
   | FooterSurface;
 
@@ -153,6 +173,8 @@ record RenderModel = {
   state: UiState,
   size: Geometry.Size,
   start: Number,
+  scrollOffset: Number,
+  scrollTarget: Number,
 };
 
 let rec graphCounts = match(graph) => {
@@ -173,15 +195,25 @@ let rec graphCounts = match(graph) => {
   },
 };
 
+let phoneAspect = (body: Geometry.Rect, size: Geometry.Size) => {
+  let pixelWidth = body.width * size.cellWidth;
+  let pixelHeight = body.height * size.cellHeight;
+  body.width < 56 || pixelWidth * 3 < pixelHeight * 4
+};
+
 let panes = (body, size) => {
-  let requested = Geometry.aspectColumns(body.height, size, 9, 19.5);
-  let leftWidth = if (body.width < 56 || requested <= 0) {
-    Geometry.percentOf(body.width, 48)
+  if (phoneAspect(body, size)) {
+    PaneLayout(body, Geometry.rect(body.x + body.width, body.y, 0, body.height))
   } else {
-    Geometry.clamp(20, body.width - 31, requested)
-  };
-  let (feed, thread) = Geometry.splitColumns(body, leftWidth, 1);
-  PaneLayout(feed, thread)
+    let requested = Geometry.aspectColumns(body.height, size, 9, 19.5);
+    let leftWidth = Geometry.clamp(20, body.width - 31, requested);
+    let (feed, thread) = Geometry.splitColumns(body, leftWidth, 1);
+    PaneLayout(feed, thread)
+  }
+};
+
+let mediaValue = (resource) => {
+  Resource.withDefault(None, resource)
 };
 
 let countText = (value) => {
@@ -200,6 +232,10 @@ let move = (count, delta, state) => {
     state.renderVersion,
     state.thread,
     state.threadGraph,
+    state.scrolling,
+    state.scrollVersion,
+    state.scrollFrame,
+    state.scrollRows,
   )
 };
 
@@ -216,6 +252,31 @@ let imageScaleName = match(scale) => {
 let postsFor = match(feeds, view) => {
   (_, Timeline) => { feeds.timelinePosts },
   (_, OwnPosts) => { feeds.ownPosts },
+};
+
+let hideMedia = match(resource) => {
+  Resource.Ready(Some(_)) => { Resource.Loading },
+  _ => { resource },
+};
+
+let rec hidePostImages = match(posts) => {
+  [] => { [] },
+  [post, ..tail] => {
+    let current: UiPost = post;
+    [
+      UiPost(
+        current.post,
+        hideMedia(current.image),
+        hideMedia(current.avatar),
+      ),
+      ..hidePostImages(tail)
+    ]
+  },
+};
+
+let postsForState = (state: UiState) => {
+  let posts = postsFor(state.feeds, state.view);
+  if (state.scrolling) { hidePostImages(posts) } else { posts }
 };
 
 let titleFor = match(feeds, view) => {

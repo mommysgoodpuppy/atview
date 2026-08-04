@@ -3,8 +3,10 @@
 from "./model.wm" import *;
 from "../proto/api.wm" import { AppFeeds, FeedPost };
 from "../proto/views.wm" import * as Views;
-from "../proto/xrpc.wm" import { AppError };
+from "../proto/xrpc.wm" import { AppError, describeError };
+from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
+from "../tui/resource.wm" import * as Resource;
 
 let rec loadPosts = match(posts, remaining) => {
   ([], _) => { Task.succeed([]) },
@@ -42,7 +44,7 @@ let rec loadPosts = match(posts, remaining) => {
       avatarTask,
       loadPosts(tail, nextRemaining)
     | :> Task.map((image, avatar, loadedTail) => {
-      [UiPost(feedPost, image, avatar), ..loadedTail]
+      [UiPost(feedPost, Resource.Ready(image), Resource.Ready(avatar)), ..loadedTail]
     })
   },
 };
@@ -71,7 +73,15 @@ let rec pendingPosts = match(posts) => {
   [] => { [] },
   [post, ..tail] => {
     let feedPost: FeedPost = post;
-    [UiPost(feedPost, None, None), ..pendingPosts(tail)]
+    let image = match(feedPost.image) {
+      None => { Resource.Ready(None) },
+      Some(_) => { Resource.Pending },
+    };
+    let avatar = match(feedPost.avatar) {
+      None => { Resource.Ready(None) },
+      Some(_) => { Resource.Pending },
+    };
+    [UiPost(feedPost, image, avatar), ..pendingPosts(tail)]
   },
 };
 
@@ -94,12 +104,12 @@ let rec republishPost = match(posts, uri, image, avatar) => {
     if (current.post.uri == uri) {
       -- Media already present wins, so a later empty result cannot clear it.
       let nextImage = match(current.image) {
-        Some(existing) => { Some(existing) },
-        None => { image },
+        Resource.Ready(Some(_)) => { current.image },
+        _ => { image },
       };
       let nextAvatar = match(current.avatar) {
-        Some(existing) => { Some(existing) },
-        None => { avatar },
+        Resource.Ready(Some(_)) => { current.avatar },
+        _ => { avatar },
       };
       [UiPost(current.post, nextImage, nextAvatar), ..tail]
     } else {
@@ -125,9 +135,13 @@ let publishPostMedia = (state: UiState, uri, image, avatar) => {
     ),
     state.loading,
     state.status,
-    state.renderVersion,
+    state.renderVersion + 1,
     state.thread,
     state.threadGraph,
+    state.scrolling,
+    state.scrollVersion,
+    state.scrollFrame,
+    state.scrollRows,
   )
 };
 
@@ -135,19 +149,23 @@ let postMediaTask = (post: UiPost, wantImage) => {
   let feedPost: FeedPost = post.post;
   let imageTask = if (wantImage) {
     match(feedPost.image) {
-      None => { Task.succeed(None) },
+      None => { Task.succeed(Resource.Ready(None)) },
       Some(source) => {
         let typedSource: Views.PostImage = source;
-        Kitty.load(typedSource) :> Task.map(Some) :> Task.recover((_) => { None })
+        Kitty.load(typedSource)
+          :> Task.map((image) => { Resource.Ready(Some(image)) })
+          :> Task.recover((error) => { Resource.Failed(describeError(error)) })
       },
     }
   } else {
-    Task.succeed(None)
+    Task.succeed(Resource.Pending)
   };
   let avatarTask = match(feedPost.avatar) {
-    None => { Task.succeed(None) },
+    None => { Task.succeed(Resource.Ready(None)) },
     Some(url) => {
-      Kitty.loadAvatar(url) :> Task.map(Some) :> Task.recover((_) => { None })
+      Kitty.loadAvatar(url)
+        :> Task.map((avatar) => { Resource.Ready(Some(avatar)) })
+        :> Task.recover((error) => { Resource.Failed(describeError(error)) })
     },
   };
   Task|
@@ -158,39 +176,104 @@ let postMediaTask = (post: UiPost, wantImage) => {
   })
 };
 
-let rec mediaTasksFor = match(posts, images) => {
-  ([], _) => { [] },
-  ([post, ..tail], _) => {
+let loading = match(resource) => {
+  Resource.Pending => { Resource.Loading },
+  _ => { resource },
+};
+
+let rec markPostMedia = match(posts, uri, wantImage) => {
+  ([], _, _) => { [] },
+  ([post, ..tail], _, _) => {
     let current: UiPost = post;
-    let feedPost: FeedPost = current.post;
-    let hasMedia = match(current.image) {
-      Some(_) => { true },
-      None => {
-        match(current.avatar) {
-          Some(_) => { true },
-          None => { false },
-        }
-      },
-    };
-    let wantImage = if (images <= 0) { false } else { true };
-    let nextImages = match(feedPost.image) {
-      Some(_) => { if (images <= 0) { 0 } else { images - 1 } },
-      None => { images },
-    };
-    if (hasMedia) {
-      mediaTasksFor(tail, nextImages)
+    if (current.post.uri == uri) {
+      [
+        UiPost(
+          current.post,
+          if (wantImage) { loading(current.image) } else { current.image },
+          loading(current.avatar),
+        ),
+        ..tail
+      ]
     } else {
-      [postMediaTask(current, wantImage), ..mediaTasksFor(tail, nextImages)]
+      [current, ..markPostMedia(tail, uri, wantImage)]
     }
   },
 };
 
-let feedMediaTasks = (state: UiState) => {
+let markMediaLoading = (state: UiState, uri, wantImage) => {
   let feeds: UiFeeds = state.feeds;
-  List.append(
-    mediaTasksFor(feeds.timelinePosts, 3),
-    mediaTasksFor(feeds.ownPosts, 3),
+  let timeline = match(state.view) {
+    Timeline => { markPostMedia(feeds.timelinePosts, uri, wantImage) },
+    OwnPosts => { feeds.timelinePosts },
+  };
+  let own = match(state.view) {
+    Timeline => { feeds.ownPosts },
+    OwnPosts => { markPostMedia(feeds.ownPosts, uri, wantImage) },
+  };
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    UiFeeds(
+      feeds.handle,
+      feeds.did,
+      feeds.accessJwt,
+      timeline,
+      own,
+      feeds.timelineCursor,
+      feeds.ownCursor,
+    ),
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    state.threadGraph,
+    state.scrolling,
+    state.scrollVersion,
+    state.scrollFrame,
+    state.scrollRows,
   )
+};
+
+let rec planMediaWindow = match(posts, remaining, images, plan) => {
+  ([], _, _, _) => { plan },
+  (_, 0, _, _) => { plan },
+  ([post, ..tail], _, _, _) => {
+    let current: UiPost = post;
+    let feedPost: FeedPost = current.post;
+    let wantImage = images > 0;
+    let imagePending = wantImage && Resource.isPending(current.image);
+    let mediaPending = imagePending || Resource.isPending(current.avatar);
+    let nextImages = match(feedPost.image) {
+      Some(_) => { if (images <= 0) { 0 } else { images - 1 } },
+      None => { images },
+    };
+    let nextPlan = if (mediaPending) {
+      MediaPlan(
+        markMediaLoading(plan.state, feedPost.uri, wantImage),
+        [postMediaTask(current, wantImage), ..plan.tasks],
+      )
+    } else {
+      plan
+    };
+    planMediaWindow(tail, remaining - 1, nextImages, nextPlan)
+  },
+};
+
+let feedMediaPlan = (state: UiState) => {
+  let posts = postsFor(state.feeds, state.view);
+  let start = Geometry.clamp(0, List.length(posts), state.selected - 1);
+  planMediaWindow(
+    List.drop(posts, start),
+    3,
+    2,
+    MediaPlan(state, []),
+  )
+};
+
+let feedMediaTasks = (state: UiState) => {
+  let plan = feedMediaPlan(state);
+  plan.tasks
 };
 
 let apiFeeds = (feeds: UiFeeds) => {
@@ -216,6 +299,10 @@ let withThread = (state: UiState, thread, version) => {
     version,
     thread,
     state.threadGraph,
+    state.scrolling,
+    state.scrollVersion,
+    state.scrollFrame,
+    state.scrollRows,
   )
 };
 

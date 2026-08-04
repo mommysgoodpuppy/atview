@@ -26,13 +26,17 @@ let renderFooter = (state: UiState, size: Geometry.Size) => {
   } else {
     ""
   };
+  let help = if (phoneAspect(Geometry.screen(size), size)) {
+    "   j/k move   t/m feed   f scale   q quit "
+  } else {
+    "   t timeline   m my posts   f fit/fill   ↑/↓ j/k move   q quit "
+  };
   Draw.fill(footer, " ", Draw.status) ++
     Draw.text(
       footer,
       " " ++ titleFor(feeds, state.view) ++ "   " ++
         Result.textOf(state.selected + 1) ++ "/" ++ Result.textOf(List.length(posts)) ++
-        activity ++ background ++
-        "   t timeline   m my posts   f fit/fill   ↑/↓ j/k move   q quit ",
+        activity ++ background ++ help,
       Draw.status,
     )
 };
@@ -101,8 +105,38 @@ let rec renderBorderAt = match(area, posts, request) => {
   },
 };
 
+let renderViewport = (
+  state: UiState,
+  size: Geometry.Size,
+  start,
+  inset,
+) => {
+  let posts = postsForState(state);
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
+  let feedArea = Geometry.rect(
+    split.feed.x,
+    split.feed.y - inset,
+    split.feed.width,
+    split.feed.height + inset,
+  );
+  let visible = List.drop(posts, start);
+  let cursor = CardCursor(state.selected, start);
+  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
+    renderCards(feedArea, visible, start, layout) ++
+    renderBorderAt(
+      feedArea,
+      visible,
+      BorderRender(cursor, layout, state.selected, true, true),
+    ) ++
+    (if (split.thread.width > 0) { renderThreadPane(split.thread, state, size) } else { "" }) ++
+    renderFooter(state, size) ++
+    Draw.endFrame ++ Ansi.endSynchronizedUpdate
+};
+
 let renderFull = (state: UiState, size: Geometry.Size) => {
-  let posts = postsFor(state.feeds, state.view);
+  let posts = postsForState(state);
   let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
   let split = panes(body, size);
   let start = visibleStart(
@@ -116,19 +150,21 @@ let renderFull = (state: UiState, size: Geometry.Size) => {
       state.imageScale,
     ),
   );
+  renderViewport(state, size, start, 0)
+};
+
+let renderFeedMedia = (state: UiState, size: Geometry.Size, start, showImages) => {
+  let posts = postsFor(state.feeds, state.view);
+  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let split = panes(body, size);
   let visible = List.drop(posts, start);
-  let cursor = CardCursor(state.selected, start);
-  let layout = FeedLayout(split.feed.width, size, state.imageScale);
-  Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
-    renderCards(split.feed, visible, start, layout) ++
-    renderBorderAt(
-      split.feed,
-      visible,
-      BorderRender(cursor, layout, state.selected, true, true),
-    ) ++
-    renderThreadPane(split.thread, state, size) ++
-    renderFooter(state, size) ++
-    Draw.endFrame ++ Ansi.endSynchronizedUpdate
+  renderMediaCards(
+    split.feed,
+    visible,
+    start,
+    FeedLayout(split.feed.width, size, state.imageScale),
+    showImages,
+  )
 };
 
 let renderSelectionOutline = (
@@ -139,7 +175,7 @@ let renderSelectionOutline = (
   active,
   standalone,
 ) => {
-  let posts = postsFor(state.feeds, state.view);
+  let posts = postsForState(state);
   let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
   let split = panes(body, size);
   let visible = List.drop(posts, start);
@@ -155,8 +191,12 @@ let renderSelectionOutline = (
 let renderThreadRegion = (state: UiState, size: Geometry.Size) => {
   let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
   let split = panes(body, size);
-  Kitty.deleteImage(1) ++
-    deleteThreadImages(2000, size.height + 1) ++
-    Draw.fill(split.thread, " ", Draw.plain) ++
-    renderThreadPane(split.thread, state, size)
+  if (split.thread.width <= 0) {
+    ""
+  } else {
+    Kitty.deleteImage(1) ++
+      deleteThreadImages(2000, size.height + 1) ++
+      Draw.fill(split.thread, " ", Draw.plain) ++
+      renderThreadPane(split.thread, state, size)
+  }
 };

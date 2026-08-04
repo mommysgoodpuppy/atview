@@ -34,6 +34,16 @@ that Workman has mutable references.
 
 ## Progress
 
+- 2026-08-04: Added reusable immutable row-scrolling primitives and connected the feed viewport to
+  timer-driven easing. Variable-height cards can now enter and leave through a partially clipped
+  top edge instead of snapping at post boundaries. Rapid navigation replaces the animation
+  generation, stale timer patches are ignored, media is withheld during motion and restored on
+  settle, Page Up/Down move by three posts, and SGR wheel reports drive a persistent free-row
+  target without aligning the final viewport to a card boundary. Wheel input advances the
+  lightweight selection/media cursor but does not start a thread request for every row gesture.
+  `scroll-probe.wm` covers easing, reversal, exact arrival, shared borders, and viewport location;
+  `event-pattern-probe.wm` now covers wheel decoding as well.
+
 - 2026-07-24: Studied btop terminal initialization/restoration and key decoding, plus lazygit's
   layout pass, view model, focus/binding conventions, and stale-cell rendering.
 - 2026-07-24: Chose immutable draw commands as the widget boundary. A renderer may later rasterize

@@ -8,6 +8,7 @@ from "./draw.wm" import * as Draw;
 from "./geometry.wm" import * as Geometry;
 from "./halfblock.wm" import * as HalfBlock;
 from "./kitty.wm" import * as Kitty;
+from "./resource.wm" import * as Resource;
 from "./terminal-cap.wm" import * as Cap;
 
 type Element =
@@ -57,6 +58,10 @@ let showIf = (condition, element) => {
 let optional = match(value, present) => {
   (None, _) => { Empty },
   (Some(item), _) => { present(item) },
+};
+
+let suspense = (resource, pending, failed, ready) => {
+  Resource.resolve(resource, pending, failed, ready)
 };
 
 let rec render = match(terminal, element) => {

@@ -1,13 +1,14 @@
 -- Reactive render dependencies and incremental terminal surface updates.
 
 from "./model.wm" import *;
-from "./feed-view.wm" import { visibleStart };
+from "./feed-view.wm" import { cardHeights, visibleStart };
 from "./view.wm" import *;
 from "../tui/ansi.wm" import * as Ansi;
 from "../tui/draw.wm" import * as Draw;
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
 from "../tui/reactive.wm" import * as Reactive;
+from "../tui/scroll.wm" import * as Scroll;
 from "../tui/surface.wm" import * as Surface;
 
 let threadKey = match(thread) => {
@@ -19,7 +20,9 @@ let threadKey = match(thread) => {
 let feedRegion = (model: RenderModel) => {
   FeedRegion(
     model.state.renderVersion,
+    model.state.scrolling,
     model.start,
+    model.scrollOffset,
     model.size,
   )
 };
@@ -28,9 +31,14 @@ let selectionRegion = (model: RenderModel) => {
   SelectionRegion(model.state.selected, model.start)
 };
 
+let mediaRegion = (model: RenderModel) => {
+  MediaRegion(model.state.scrolling, model.start, model.size)
+};
+
 let threadRegion = (model: RenderModel) => {
   ThreadRegion(
     model.state.selected,
+    model.state.scrolling,
     model.state.renderVersion,
     model.state.imageScale,
     threadKey(model.state.thread),
@@ -87,7 +95,9 @@ let sameBool = match(left, right) => {
 
 let sameFeedRegion = (left: FeedRegion, right: FeedRegion) => {
   sameNumber(left.renderVersion, right.renderVersion) &&
+    sameBool(left.scrolling, right.scrolling) &&
     sameNumber(left.start, right.start) &&
+    sameNumber(left.scrollOffset, right.scrollOffset) &&
     sameSize(left.size, right.size)
 };
 
@@ -96,8 +106,15 @@ let sameSelectionRegion = (left: SelectionRegion, right: SelectionRegion) => {
     sameNumber(left.start, right.start)
 };
 
+let sameMediaRegion = (left: MediaRegion, right: MediaRegion) => {
+  sameBool(left.scrolling, right.scrolling) &&
+    sameNumber(left.start, right.start) &&
+    sameSize(left.size, right.size)
+};
+
 let sameThreadRegion = (left: ThreadRegion, right: ThreadRegion) => {
   sameNumber(left.selected, right.selected) &&
+    sameBool(left.scrolling, right.scrolling) &&
     sameNumber(left.renderVersion, right.renderVersion) &&
     sameScale(left.imageScale, right.imageScale) &&
     sameText(left.threadKey, right.threadKey) &&
@@ -117,6 +134,7 @@ let sameFooterRegion = (left: FooterRegion, right: FooterRegion) => {
 
 let sameRenderDependency = match(left, right) => {
   (SelectionSurface, SelectionSurface) => { true },
+  (MediaSurface, MediaSurface) => { true },
   (ThreadSurface, ThreadSurface) => { true },
   (FooterSurface, FooterSurface) => { true },
   _ => { false },
@@ -124,6 +142,11 @@ let sameRenderDependency = match(left, right) => {
 
 let selectionSignal = Reactive.signal(
   SelectionSurface,
+  (model: RenderModel) => { model },
+);
+
+let mediaSignal = Reactive.signal(
+  MediaSurface,
   (model: RenderModel) => { model },
 );
 
@@ -171,6 +194,24 @@ let selectionEffect = Reactive.effect(
   }),
 );
 
+let mediaEffect = Reactive.effect(
+  "media",
+  Reactive.read(mediaSignal) :> Reactive.map((model) => {
+    Reactive.commands(
+      [
+        Surface.Raw(
+          renderFeedMedia(
+            model.state,
+            model.size,
+            model.start,
+            !model.state.scrolling,
+          ),
+        )
+      ],
+    )
+  }),
+);
+
 let threadEffect = Reactive.effect(
   "thread",
   Reactive.read(threadSignal) :> Reactive.map((model) => {
@@ -189,12 +230,16 @@ let footerEffect = Reactive.effect(
   }),
 );
 
-let renderEffects = [selectionEffect, threadEffect, footerEffect];
+let renderEffects = [selectionEffect, mediaEffect, threadEffect, footerEffect];
 
 let changedDependencies = (previous: RenderModel, next: RenderModel) => {
   let selectionChanged = !sameSelectionRegion(
     selectionRegion(previous),
     selectionRegion(next),
+  );
+  let mediaChanged = !sameMediaRegion(
+    mediaRegion(previous),
+    mediaRegion(next),
   );
   let threadChanged = !sameThreadRegion(
     threadRegion(previous),
@@ -209,6 +254,11 @@ let changedDependencies = (previous: RenderModel, next: RenderModel) => {
   } else {
     []
   };
+  let mediaKeys = if (mediaChanged) {
+    [MediaSurface]
+  } else {
+    []
+  };
   let threadKeys = if (threadChanged) {
     [ThreadSurface]
   } else {
@@ -219,7 +269,10 @@ let changedDependencies = (previous: RenderModel, next: RenderModel) => {
   } else {
     []
   };
-  List.append(selectionKeys, List.append(threadKeys, footerKeys))
+  List.append(
+    selectionKeys,
+    List.append(mediaKeys, List.append(threadKeys, footerKeys)),
+  )
 };
 
 let synchronized = match(commands) => {
@@ -239,7 +292,7 @@ let synchronized = match(commands) => {
 };
 
 let render = (previous, state: UiState, size: Geometry.Size) => {
-  let posts = postsFor(state.feeds, state.view);
+  let posts = postsForState(state);
   let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
   let split = panes(body, size);
   let start = visibleStart(
@@ -253,14 +306,59 @@ let render = (previous, state: UiState, size: Geometry.Size) => {
       state.imageScale,
     ),
   );
-  let nextModel = RenderModel(state, size, start);
+  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  let heights = cardHeights(posts, layout);
+  let selectedTarget = Scroll.offsetOf(heights, start, 0);
+  let maximumOffset = Scroll.offsetOf(
+    heights,
+    Geometry.nonNegative(List.length(heights) - 1),
+    0,
+  );
+  let targetOffset = match(previous) {
+    None => { selectedTarget },
+    Some(graph) => {
+      let old = graph.model;
+      let rowDelta = state.scrollRows - old.state.scrollRows;
+      if (rowDelta != 0) {
+        Geometry.clamp(0, maximumOffset, old.scrollTarget + rowDelta)
+      } else {
+        if (
+          !sameView(state.view, old.state.view) ||
+          !sameScale(state.imageScale, old.state.imageScale) ||
+          !sameSize(size, old.size) ||
+          state.scrollVersion != old.state.scrollVersion
+        ) {
+          selectedTarget
+        } else {
+          old.scrollTarget
+        }
+      }
+    },
+  };
+  let currentOffset = match(previous) {
+    None => { targetOffset },
+    Some(graph) => { graph.model.scrollOffset },
+  };
+  let nextOffset = if (state.scrolling) {
+    Scroll.approach(currentOffset, targetOffset)
+  } else {
+    targetOffset
+  };
+  let viewport = Scroll.locate(heights, nextOffset);
+  let nextModel = RenderModel(
+    state,
+    size,
+    viewport.start,
+    nextOffset,
+    targetOffset,
+  );
   match(previous) {
     None => {
       let mounted = Reactive.mount(nextModel, renderEffects);
       Surface.frame(
         mounted.graph,
         size,
-        [Surface.Raw(renderFull(state, size))],
+        [Surface.Raw(renderViewport(state, size, viewport.start, viewport.inset))],
       )
     },
     Some(graph) => {
@@ -269,7 +367,7 @@ let render = (previous, state: UiState, size: Geometry.Size) => {
         Surface.frame(
           mounted.graph,
           size,
-          [Surface.Raw(renderFull(state, size))],
+          [Surface.Raw(renderViewport(state, size, viewport.start, viewport.inset))],
         )
       } else {
         let flushed = Reactive.flush(

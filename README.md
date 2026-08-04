@@ -85,6 +85,7 @@ handle and DID. Tokens are retained in memory for the duration of one command an
   capture, effect cleanup, and dirty-key flushing.
 - `tui/surface.wm` — typed terminal commands and the final command-to-ANSI/Kitty host boundary.
 - `tui/reactive-probe.wm` — deterministic dynamic-subscription and invocation-group probe.
+- `tui/scroll-probe.wm` — deterministic row easing, reversal, and partial-viewport probe.
 - `tui/kitty.wm` — Bluesky PNG fetching and direct Kitty graphics APC/chunk generation.
 - `tui/kitty-layout-probe.wm` — deterministic fit/fill control-sequence and crop-math probe.
 - `tui/avatar-metadata-probe.wm` — authenticated avatar URL projection probe without token output.

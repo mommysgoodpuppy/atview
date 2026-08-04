@@ -254,7 +254,7 @@ let renderThreadStatus = (area, thread, size) => {
 let threadPane = (area, state: UiState, size: Geometry.Size) => {
   let inner = Geometry.inset(area, 1);
   let frame = Ui.box(area, "post + replies", false);
-  match(List.at(postsFor(state.feeds, state.view), state.selected)) {
+  match(List.at(postsForState(state), state.selected)) {
     None => {
       Ui.fragment([
         frame,
@@ -263,7 +263,7 @@ let threadPane = (area, state: UiState, size: Geometry.Size) => {
     },
     Some(item) => {
       let avatarRows = 2;
-      let avatarColumns = match(item.avatar) {
+      let avatarColumns = match(mediaValue(item.avatar)) {
         Some(_) => { Kitty.squareColumns(avatarRows, size) },
         None => { 0 },
       };
@@ -296,7 +296,7 @@ let threadPane = (area, state: UiState, size: Geometry.Size) => {
       let repliesRow = metricsRow + 2;
       Ui.fragment([
         frame,
-        Ui.optional(item.avatar, (image) => {
+        Ui.optional(mediaValue(item.avatar), (image) => {
           Ui.image(
             2000,
             Geometry.rect(
@@ -324,7 +324,7 @@ let threadPane = (area, state: UiState, size: Geometry.Size) => {
           lines,
           Draw.plain,
         ),
-        Ui.optional(item.image, (image) => {
+        Ui.optional(mediaValue(item.image), (image) => {
           Ui.showIf(
             mediaRows > 0,
             Ui.image(

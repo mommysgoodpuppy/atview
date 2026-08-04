@@ -1,0 +1,13 @@
+from "./model.wm" import * as Model;
+from "../tui/geometry.wm" import * as Geometry;
+
+let main = () => {
+  let body = Geometry.rect(0, 0, 80, 39);
+  let phone = Model.panes(body, Geometry.Size(80, 40, 10, 20));
+  let desktop = Model.panes(Geometry.rect(0, 0, 120, 29), Geometry.Size(120, 30, 10, 20));
+  if (phone.feed.width == 80 && phone.thread.width == 0 && desktop.feed.width > 0 && desktop.thread.width > 0) {
+    print("responsive layout ok")
+  } else {
+    print("responsive layout mismatch")
+  }
+};

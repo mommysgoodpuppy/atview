@@ -17,6 +17,8 @@ let reset = csi ++ "0m";
 let queryCellSize = csi ++ "16t";
 let beginSynchronizedUpdate = csi ++ "?2026h";
 let endSynchronizedUpdate = csi ++ "?2026l";
+let enableMouse = csi ++ "?1000h" ++ csi ++ "?1006h";
+let disableMouse = csi ++ "?1006l" ++ csi ++ "?1000l";
 
 let cursorTo = (row, column) => {
   csi ++ Result.textOf(row) ++ ";" ++ Result.textOf(column) ++ "H"
@@ -44,5 +46,5 @@ let bold = csi ++ "1m";
 let dim = csi ++ "2m";
 let reverse = csi ++ "7m";
 
-let enter = alternateScreen ++ hideCursor ++ clear ++ home;
-let leave = reset ++ showCursor ++ normalScreen;
+let enter = alternateScreen ++ enableMouse ++ hideCursor ++ clear ++ home;
+let leave = reset ++ disableMouse ++ showCursor ++ normalScreen;

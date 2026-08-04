@@ -19,6 +19,8 @@ type Key =
   | ShiftTab
   | PageUp
   | PageDown
+  | WheelUp
+  | WheelDown
   | Home
   | End
   | CellSize<Number, Number>
@@ -95,6 +97,28 @@ let rec positiveUntil = (
   }
 };
 
+let rec positiveUntilMouseEnd = (input, value, seen) => {
+  match(input) {
+    [] => { InvalidNumberPrefix },
+    [character, ..rest] => {
+      if (character == "M" || character == "m") {
+        if (seen && value > 0) {
+          NumberPrefix(value, rest)
+        } else {
+          InvalidNumberPrefix
+        }
+      } else {
+        match(digit(character)) {
+          None => { InvalidNumberPrefix },
+          Some(next) => {
+            positiveUntilMouseEnd(rest, value * 10 + next, true)
+          },
+        }
+      }
+    },
+  }
+};
+
 let cellSizePrefix = match(input) => {
   [escape, "[", "6", ";", ..rest] => {
     match(positiveUntil(rest, ";", 0, false)) {
@@ -104,6 +128,36 @@ let cellSizePrefix = match(input) => {
           InvalidNumberPrefix => { None },
           NumberPrefix(width, afterWidth) => {
             Some((CellSize(width, height), afterWidth))
+          },
+        }
+      },
+    }
+  },
+  _ => { None },
+};
+
+let mousePrefix = match(input) => {
+  [escape, "[", "<", ..rest] => {
+    match(positiveUntil(rest, ";", 0, false)) {
+      InvalidNumberPrefix => { None },
+      NumberPrefix(button, afterButton) => {
+        match(positiveUntil(afterButton, ";", 0, false)) {
+          InvalidNumberPrefix => { None },
+          NumberPrefix(_, afterColumn) => {
+            match(positiveUntilMouseEnd(afterColumn, 0, false)) {
+              InvalidNumberPrefix => { None },
+              NumberPrefix(_, afterRow) => {
+                if (button == 64) {
+                  Some((WheelUp, afterRow))
+                } else {
+                  if (button == 65) {
+                    Some((WheelDown, afterRow))
+                  } else {
+                    Some((Unknown("mouse"), afterRow))
+                  }
+                }
+              },
+            }
           },
         }
       },
@@ -133,7 +187,13 @@ let rec decodeCharacters = (input) => {
       [report, ..decodeCharacters(rest)]
     },
     None => {
-      match(input) {
+      match(mousePrefix(input)) {
+        Some(found) => {
+          let (event, rest) = found;
+          [event, ..decodeCharacters(rest)]
+        },
+        None => {
+          match(input) {
         [] => { [] },
         [escape, "[", "A", ..rest] => {
           [Up, ..decodeCharacters(rest)]
@@ -182,6 +242,8 @@ let rec decodeCharacters = (input) => {
         },
         [character, ..rest] => {
           [decodeCharacter(character), ..decodeCharacters(rest)]
+        },
+          }
         },
       }
     },

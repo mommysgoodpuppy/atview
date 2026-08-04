@@ -1,6 +1,6 @@
 -- Application event transitions and asynchronous feed pagination.
 
-from "./data.wm" import { apiFeeds, loadPosts };
+from "./data.wm" import { apiFeeds, feedMediaPlan, pendingPosts };
 from "./graph.wm" import { buildPrefetchPlan, loadSelectedThread };
 from "./model.wm" import *;
 from "../proto/api.wm" import {
@@ -8,9 +8,10 @@ from "../proto/api.wm" import {
   loadMoreOwnPosts,
   loadMoreTimeline,
 };
-from "../proto/xrpc.wm" import { AppError, describeError };
+from "../proto/xrpc.wm" import { AppError, JavaScriptFailure, describeError };
 from "../tui/command.wm" import * as Command;
 from "../tui/event.wm" import * as Event;
+from "../tui/timer.wm" import * as Timer;
 
 let loadedState = match(state, requestedView, page, posts) => {
   (_, _, _, _) => {
@@ -53,6 +54,10 @@ let loadedState = match(state, requestedView, page, posts) => {
       state.renderVersion + 1,
       state.thread,
       state.threadGraph,
+      state.scrolling,
+      state.scrollVersion,
+      state.scrollFrame,
+      state.scrollRows,
     )
   },
 };
@@ -74,12 +79,14 @@ let loadNextPage = (state: UiState) => {
     plan.state.renderVersion,
     plan.state.thread,
     plan.state.threadGraph,
+    plan.state.scrolling,
+    plan.state.scrollVersion,
+    plan.state.scrollFrame,
+    plan.state.scrollRows,
   );
   let task = request
-    :> Task.andThen((page: FeedPage) => {
-      loadPosts(page.posts, 3) :> Task.map((posts) => {
-        (page, posts)
-      })
+    :> Task.map((page: FeedPage) => {
+      (page, pendingPosts(page.posts))
     })
     :> Task.map((loadedPage) => {
       let (page, posts) = loadedPage;
@@ -99,6 +106,10 @@ let loadNextPage = (state: UiState) => {
           current.renderVersion,
           current.thread,
           current.threadGraph,
+          current.scrolling,
+          current.scrollVersion,
+          current.scrollFrame,
+          current.scrollRows,
         )
       }
     });
@@ -138,7 +149,25 @@ let moveDown = (state) => {
   }
 };
 
-let updateState = match(key, state) => {
+let scrollByRows = (state: UiState, rows) => {
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    state.threadGraph,
+    state.scrolling,
+    state.scrollVersion,
+    state.scrollFrame,
+    state.scrollRows + rows,
+  )
+};
+
+let updateStateBase = match(key, state) => {
   (Event.CtrlC, _) => { Command.Quit },
   (Event.Character("q"), _) => { Command.Quit },
   (Event.Character("t"), _) => {
@@ -153,6 +182,10 @@ let updateState = match(key, state) => {
         state.renderVersion + 1,
         state.thread,
         state.threadGraph,
+        state.scrolling,
+        state.scrollVersion,
+        state.scrollFrame,
+        state.scrollRows,
       ),
     )
   },
@@ -168,6 +201,10 @@ let updateState = match(key, state) => {
         state.renderVersion + 1,
         state.thread,
         state.threadGraph,
+        state.scrolling,
+        state.scrollVersion,
+        state.scrollFrame,
+        state.scrollRows,
       ),
     )
   },
@@ -183,6 +220,10 @@ let updateState = match(key, state) => {
         state.renderVersion + 1,
         state.thread,
         state.threadGraph,
+        state.scrolling,
+        state.scrollVersion,
+        state.scrollFrame,
+        state.scrollRows,
       ),
     )
   },
@@ -202,8 +243,45 @@ let updateState = match(key, state) => {
       loadSelectedThread(next)
     }
   },
+  (Event.WheelUp, _) => {
+    Command.Continue(
+      scrollByRows(
+        move(List.length(postsFor(state.feeds, state.view)), -1, state),
+        -3,
+      ),
+    )
+  },
   (Event.Down, _) => { moveDown(state) },
   (Event.Character("j"), _) => { moveDown(state) },
+  (Event.WheelDown, _) => {
+    Command.Continue(
+      scrollByRows(
+        move(List.length(postsFor(state.feeds, state.view)), 1, state),
+        3,
+      ),
+    )
+  },
+  (Event.PageUp, _) => {
+    let next = move(List.length(postsFor(state.feeds, state.view)), -3, state);
+    if (next.selected == state.selected) {
+      Command.Continue(next)
+    } else {
+      loadSelectedThread(next)
+    }
+  },
+  (Event.PageDown, _) => {
+    let count = List.length(postsFor(state.feeds, state.view));
+    let next = move(count, 3, state);
+    if (!state.loading && hasMore(state) && next.selected >= count - 3) {
+      loadNextPage(next)
+    } else {
+      if (next.selected == state.selected) {
+        Command.Continue(next)
+      } else {
+        loadSelectedThread(next)
+      }
+    }
+  },
   (Event.Home, _) => {
     loadSelectedThread(
       UiState(
@@ -216,6 +294,10 @@ let updateState = match(key, state) => {
         state.renderVersion,
         state.thread,
         state.threadGraph,
+        state.scrolling,
+        state.scrollVersion,
+        state.scrollFrame,
+        state.scrollRows,
       ),
     )
   },
@@ -231,8 +313,161 @@ let updateState = match(key, state) => {
         state.renderVersion,
         state.thread,
         state.threadGraph,
+        state.scrolling,
+        state.scrollVersion,
+        state.scrollFrame,
+        state.scrollRows,
       ),
     )
   },
   _ => { Command.Continue(state) },
+};
+
+let scheduleMedia = match(step) => {
+  Command.Quit => { Command.Quit },
+  Command.Continue(state) => {
+    if (state.scrolling) {
+      Command.Continue(state)
+    } else {
+      let media = feedMediaPlan(state);
+      match(media.tasks) {
+        [] => { Command.Continue(media.state) },
+        _ => { Command.SpawnMany(media.state, media.tasks) },
+      }
+    }
+  },
+  Command.Spawn(state, task) => {
+    if (state.scrolling) {
+      Command.Spawn(state, task)
+    } else {
+      let media = feedMediaPlan(state);
+      Command.SpawnMany(media.state, [task, ..media.tasks])
+    }
+  },
+  Command.SpawnMany(state, tasks) => {
+    if (state.scrolling) {
+      Command.SpawnMany(state, tasks)
+    } else {
+      let media = feedMediaPlan(state);
+      Command.SpawnMany(media.state, List.append(tasks, media.tasks))
+    }
+  },
+  Command.Await(state, task) => { Command.Await(state, task) },
+};
+
+let scrollKey = match(key) => {
+  Event.Up => { true },
+  Event.Down => { true },
+  Event.Home => { true },
+  Event.End => { true },
+  Event.PageUp => { true },
+  Event.PageDown => { true },
+  Event.WheelUp => { true },
+  Event.WheelDown => { true },
+  Event.Character("j") => { true },
+  Event.Character("k") => { true },
+  _ => { false },
+};
+
+let scrollingState = (state: UiState, version, scrolling) => {
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    state.threadGraph,
+    scrolling,
+    version,
+    0,
+    state.scrollRows,
+  )
+};
+
+let scrollFrameState = (state: UiState, version, frame, scrolling) => {
+  UiState(
+    state.selected,
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    state.threadGraph,
+    scrolling,
+    version,
+    frame,
+    state.scrollRows,
+  )
+};
+
+let animationFrame = (version, frame, milliseconds, finalFrame) => {
+  Timer.delay(milliseconds)
+    :> Task.mapErr(JavaScriptFailure)
+    :> Task.map((_) => {
+      (current: UiState) => {
+        if (
+          current.scrollVersion == version &&
+          current.scrollFrame < frame
+        ) {
+          scrollFrameState(
+            current,
+            version,
+            frame,
+            !finalFrame,
+          )
+        } else {
+          current
+        }
+      }
+    })
+};
+
+let animationFrames = (version) => {
+  [
+    animationFrame(version, 1, 16, false),
+    animationFrame(version, 2, 32, false),
+    animationFrame(version, 3, 48, false),
+    animationFrame(version, 4, 64, false),
+    animationFrame(version, 5, 80, false),
+    animationFrame(version, 6, 96, false),
+    animationFrame(version, 7, 112, false),
+    animationFrame(version, 8, 500, true),
+  ]
+};
+
+let beginScroll = match(step) => {
+  Command.Quit => { Command.Quit },
+  Command.Continue(state) => {
+    let version = state.scrollVersion + 1;
+    Command.SpawnMany(
+      scrollingState(state, version, true),
+      animationFrames(version),
+    )
+  },
+  Command.Spawn(state, task) => {
+    let version = state.scrollVersion + 1;
+    Command.SpawnMany(
+      scrollingState(state, version, true),
+      [task, ..animationFrames(version)],
+    )
+  },
+  Command.SpawnMany(state, tasks) => {
+    let version = state.scrollVersion + 1;
+    Command.SpawnMany(
+      scrollingState(state, version, true),
+      List.append(animationFrames(version), tasks),
+    )
+  },
+  Command.Await(state, task) => { Command.Await(state, task) },
+};
+
+let updateState = (key, state) => {
+  let updated = updateStateBase(key, state);
+  let scrolling = if (scrollKey(key)) { beginScroll(updated) } else { updated };
+  scheduleMedia(scrolling)
 };
