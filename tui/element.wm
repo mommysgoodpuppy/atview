@@ -91,9 +91,9 @@ let rec render = match(terminal, element) => {
     Draw.timelineBox(area, active, joinedTop, joinedBottom)
   },
   (_, Image(identifier, area, scale, value)) => {
-    match(Cap.backend) {
-      Cap.KittyGraphics => { Kitty.renderWithId(identifier, area, terminal, scale, value) },
-      Cap.HalfBlock => { HalfBlock.render(area, scale, value) },
+    match(Cap.renderer) {
+      Cap.KittyRenderer => { Kitty.renderWithId(identifier, area, terminal, scale, value) },
+      Cap.HalfBlockRenderer => { HalfBlock.render(area, scale, value) },
     }
   },
 };

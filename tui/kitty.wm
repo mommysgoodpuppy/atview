@@ -8,21 +8,12 @@ from "./geometry.wm" import * as Geometry;
 from "./png.wm" import * as Png;
 from "./png-jsr.wm" import * as PngJsr;
 from "./terminal-cap.wm" import * as Cap;
+from "./image.wm" import {Image, Scale, Fit, Fill};
 from js.global import { fetch };
 from js.module("node:buffer") import { Buffer };
 from js.global("Math") import {
   ceil: Number -> Number,
   floor: Number -> Number,
-};
-
-type Scale = Fit | Fill;
-
-record Image = {
-  base64: String,
-  alt: String,
-  width: Number,
-  height: Number,
-  pixels: Option<Png.Pixels>,
 };
 
 record Placement = {
@@ -37,18 +28,17 @@ let apc = (control, payload) => {
   `${Ansi.esc}_G${control};${payload}${Ansi.esc}\\`
 };
 
-let deleteAll = match(Cap.backend) {
-  Cap.KittyGraphics => { apc("a=d,d=A,q=2", "") },
-  Cap.HalfBlock => { "" },
+let deleteAll = match(Cap.renderer) {
+  Cap.KittyRenderer => { apc("a=d,d=A,q=2", "") },
+  Cap.HalfBlockRenderer => { "" },
 };
 
 let deleteImage = (identifier) => {
-  match(Cap.backend) {
-    Cap.KittyGraphics => { apc(`a=d,d=I,i=${Result.textOf(identifier)},q=2`, "") },
-    Cap.HalfBlock => { "" },
+  match(Cap.renderer) {
+    Cap.KittyRenderer => { apc(`a=d,d=I,i=${Text.of(identifier)},q=2`, "") },
+    Cap.HalfBlockRenderer => { "" },
   }
 };
-
 let rec transmitChunks = (remaining, first, placement, identifier) => {
   let size = remaining :> .length :> Result.withDefault(0);
   let more = size > 4096;
@@ -58,7 +48,7 @@ let rec transmitChunks = (remaining, first, placement, identifier) => {
   let control = if (first) {
     `a=T,f=100,q=2,C=1,${
       if (identifier > 0) {
-        `i=${Result.textOf(identifier)},`
+        `i=${Text.of(identifier)},`
       } else {
         ""
       }
@@ -110,7 +100,7 @@ let fitPlacement = (area: Geometry.Rect, terminal: Geometry.Size, image: Image) 
       roundedDown((area.height - rows) / 2),
       area.width,
       rows,
-      `c=${Result.textOf(area.width)},r=${Result.textOf(rows)}`,
+      `c=${Text.of(area.width)},r=${Text.of(rows)}`,
     )
   } else {
     let columns = Geometry.clamp(
@@ -123,7 +113,7 @@ let fitPlacement = (area: Geometry.Rect, terminal: Geometry.Size, image: Image) 
       0,
       columns,
       area.height,
-      `c=${Result.textOf(columns)},r=${Result.textOf(area.height)}`,
+      `c=${Text.of(columns)},r=${Text.of(area.height)}`,
     )
   }
 };
@@ -158,10 +148,10 @@ let fillPlacement = (area: Geometry.Rect, terminal: Geometry.Size, image: Image)
         cropHeight,
       )
     };
-  let control = `x=${Result.textOf(sourceX)},y=${Result.textOf(sourceY)},w=${
-    Result.textOf(sourceWidth)
-  },h=${Result.textOf(sourceHeight)},c=${Result.textOf(area.width)},r=${
-    Result.textOf(area.height)
+  let control = `x=${Text.of(sourceX)},y=${Text.of(sourceY)},w=${
+    Text.of(sourceWidth)
+  },h=${Text.of(sourceHeight)},c=${Text.of(area.width)},r=${
+    Text.of(area.height)
   }`;
   Placement(0, 0, area.width, area.height, control)
 };
@@ -215,14 +205,14 @@ let pngUrl = (url) => {
 };
 
 let loadPng = (url, alt) => {
-  let inspectStatus = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+  let inspectStatus = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
     Result|response.ok, response.status|
       :> Result.map((ok, status) => {
         (response, ok, status)
       })
       :> Task.fromResult
   };
-  let requireOk = Monad.lift Task (response, ok, status) => {
+  let requireOk = Monad.via Task (response, ok, status) => {
     if (ok) {
       Task.succeed(response)
     } else {
@@ -233,10 +223,10 @@ let loadPng = (url, alt) => {
         })
     }
   };
-  let readBytes = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+  let readBytes = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
     response :> .arrayBuffer()
   };
-  let decodePng = Monad.lift Task (bytes) => {
+  let decodePng = Monad.via Task (bytes) => {
     Buffer.from(bytes)
       :> Result.mapErr(Xrpc.JavaScriptFailure)
       :> Task.fromResult
@@ -245,8 +235,8 @@ let loadPng = (url, alt) => {
           :> Result.mapErr(Xrpc.JavaScriptFailure)
           :> Task.fromResult
           :> Task.andThen((base64) => {
-            match(Cap.backend) {
-              Cap.KittyGraphics => {
+            match(Cap.renderer) {
+              Cap.KittyRenderer => {
                 Result|buffer :> .readUInt32BE(16), buffer :> .readUInt32BE(20)|
                   :> Result.mapErr(Xrpc.JavaScriptFailure)
                   :> Task.fromResult
@@ -254,7 +244,7 @@ let loadPng = (url, alt) => {
                     Image(base64, alt, width, height, None)
                   })
               },
-              Cap.HalfBlock => {
+              Cap.HalfBlockRenderer => {
                 PngJsr.decode(buffer)
                   :> Task.mapErr(Xrpc.JavaScriptFailure)
                   :> Task.map((pixels) => {

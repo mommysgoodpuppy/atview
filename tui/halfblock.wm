@@ -1,6 +1,6 @@
 from "./ansi.wm" import * as Ansi;
 from "./geometry.wm" import * as Geometry;
-from "./kitty.wm" import { Image, Scale, Fit, Fill };
+from "./Image.wm" import { Image, Scale, Fit, Fill };
 from "./png.wm" import * as Png;
 from "./theme.wm" import * as Theme;
 from js.global("Math") import { floor };
@@ -82,7 +82,17 @@ let renderPixels = (area: Geometry.Rect, mode: Scale, pixels: Png.Pixels) => {
   if (area.width <= 0 || area.height <= 0 || pixels.width <= 0 || pixels.height <= 0) {
     ""
   } else {
-    let (offsetX, offsetY, columns, count, sourceX, sourceY, sourceWidth, sourceHeight) = mapping(area, mode, pixels);
+    let (
+      offsetX,
+      offsetY, 
+      columns, 
+      count, 
+      sourceX, 
+      sourceY, 
+      sourceWidth, 
+      sourceHeight) 
+        = mapping(area, mode, pixels);
+        
     rows(area, pixels, offsetX, offsetY, columns, count, sourceX, sourceY, sourceWidth, sourceHeight, 0) ++ Ansi.reset
   }
 };

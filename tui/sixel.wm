@@ -1,0 +1,58 @@
+from "./geometry.wm" import * as Geometry;
+from "./Image.wm" import { Image, Scale };
+from "./png.wm" import * as Png;
+
+record Rgba = { 
+  r: Number,
+  g: Number,
+  b: Number,
+  a: Number
+};
+
+record ImageRgba = { 
+  width: Number,
+  height: Number,
+  pixels: List<Rgba>
+};
+
+let quantize = (img) => {
+  
+};
+
+let print1pix = (pix) => {
+  print( Png.byte(pix, 0))
+};
+
+let toImgRgba = (img) => {
+  let pix = img.bytes;
+
+  let rec loop = (i, reversed) => {
+    if (i + 3 < Png.length(pix)) {
+      let rgba = Rgba(
+        Png.byte(pix, i),
+        Png.byte(pix, i + 1),
+        Png.byte(pix, i + 2),
+        Png.byte(pix, i + 3)
+      );
+      loop(i + 4, [rgba, ..reversed])
+    } else {
+      List.reverse(reversed)
+    }
+  };
+
+  let pixels = loop(0, []);
+  print pixels
+};
+
+let render = (area: Geometry.Rect, mode: Scale, image: Image) => {
+  let pixels = match(image.pixels) {
+    Some(p) => {p}
+  };
+  let imgrgb = toImgRgba(pixels);
+  print1pix(pixels.bytes);
+  ?;
+  
+  let imageQuantizedColor = quantize(image);
+  
+  ""
+};

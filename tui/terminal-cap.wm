@@ -1,8 +1,19 @@
 from js.global("Deno") import unsafe * as Deno;
 
+-- The terminal's detected image protocol. Sixel is detected even
+-- though no sixel encoder exists yet; it maps to half-block
+-- rendering until one is added.
 type Backend =
   | KittyGraphics
+  | Sixel
   | HalfBlock;
+
+-- What we actually render with. Consumers match on this instead
+-- of `backend` so that adding a new detected protocol never
+-- creates dead arms in rendering code.
+type Renderer =
+  | KittyRenderer
+  | HalfBlockRenderer;
 
 let envString = (name) => {
   match(Deno.env.get(name)) {
@@ -23,40 +34,72 @@ let nonEmpty = (value) => {
   value != ""
 };
 
+-- Terminals that implement the Kitty graphics protocol.
+-- Kitty, Ghostty, WezTerm, and Konsole 24.12+ transmit inline
+-- images through APC chunks. Terminals that do not understand
+-- APC silently ignore it, so a false positive degrades to "no
+-- image" rather than screen corruption.
+let supportsKittyGraphics = () => {
+  let term = envString("TERM");
+  let termProgram = envString("TERM_PROGRAM");
+  nonEmpty(envString("KITTY_WINDOW_ID")) ||
+  nonEmpty(envString("GHOSTTY_RESOURCES_DIR")) ||
+  nonEmpty(envString("WEZTERM_EXECUTABLE")) ||
+  termProgram == "ghostty" ||
+  termProgram == "WezTerm" ||
+  termProgram == "konsole" ||
+  textIncludes(term, "kitty") ||
+  textIncludes(term, "ghostty") ||
+  textIncludes(term, "wezterm")
+};
+
+-- Terminals known to support sixel graphics. Static env-var
+-- detection is imperfect — a sixel terminal not listed here
+-- falls back to half-block. False positives are safe because
+-- Sixel currently renders as half-block.
+let supportsSixel = () => {
+  let term = envString("TERM");
+  let termProgram = envString("TERM_PROGRAM");
+  nonEmpty(envString("WT_SESSION")) ||
+  termProgram == "mintty" ||
+  textIncludes(term, "foot") ||
+  textIncludes(term, "mlterm") ||
+  textIncludes(term, "contour")
+};
+
 let detectBackend = () => {
-  let override = envString("ATVIEW_IMAGE_BACKEND");
-  if (override == "kitty") {
-    KittyGraphics
-  } else {
-    if (override == "half" || override == "ansi" || override == "halfblock") {
-      HalfBlock
-    } else {
-      let term = envString("TERM");
-      let termProgram = envString("TERM_PROGRAM");
-      let termux = envString("TERMUX_VERSION");
-      let kittyWindow = envString("KITTY_WINDOW_ID");
-      let ghostty = envString("GHOSTTY_RESOURCES_DIR");
-      let wez = envString("WEZTERM_EXECUTABLE");
-      if (nonEmpty(termux)) {
-        HalfBlock
+  match(envString("ATVIEW_IMAGE_BACKEND")) {
+    "kitty" => { KittyGraphics },
+    "sixel" => { Sixel },
+    "half" => { HalfBlock },
+    "ansi" => { HalfBlock },
+    "halfblock" => { HalfBlock },
+    _ => {
+      if (supportsKittyGraphics()) {
+        KittyGraphics
       } else {
-        if (
-          nonEmpty(kittyWindow) || nonEmpty(ghostty) || nonEmpty(wez) ||
-          termProgram == "ghostty" || termProgram == "WezTerm" ||
-          textIncludes(term, "kitty") || textIncludes(term, "ghostty")
-        ) {
-          KittyGraphics
+        if (supportsSixel()) {
+          Sixel
         } else {
           HalfBlock
         }
       }
-    }
+    },
   }
 };
 
 let backendName = match(backend) => {
   KittyGraphics => { "kitty" },
+  Sixel => { "sixel" },
   HalfBlock => { "half-block" },
 };
 
 let backend = detectBackend();
+
+-- Maps the detected protocol to what we can actually render with.
+-- Sixel falls back to half-block until a sixel encoder is added.
+let renderer = match(backend) {
+  KittyGraphics => { KittyRenderer },
+  Sixel => { HalfBlockRenderer },
+  HalfBlock => { HalfBlockRenderer },
+};

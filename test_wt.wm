@@ -1,0 +1,130 @@
+-- ============================================================================
+-- test_wt — draws a synthetic RGB square through the detected image backend.
+--
+-- Under Windows Terminal (WT_SESSION) the backend is Sixel; until the
+-- hand-written sixel encoder exists in tui/sixel.wm, it falls back to the
+-- half-block renderer.
+-- ============================================================================
+
+from "./tui/ansi.wm" import * as Ansi;
+from "./tui/command.wm" import * as Command;
+from "./tui/draw.wm" import * as Draw;
+from "./tui/geometry.wm" import * as Geometry;
+from "./tui/halfblock.wm" import * as HalfBlock;
+from "./tui/kitty.wm" import * as Kitty;
+from "./tui/image.wm" import * as Image;
+from "./tui/png.wm" import * as Png;
+from "./tui/event.wm" import * as Event;
+from "./tui/runtime.wm" import * as Runtime;
+from "./tui/sixel.wm" import { render as sixelRender };
+from "./tui/terminal-cap.wm" import * as Cap;
+from js.module("node:buffer") import { Buffer };
+
+-- ----------------------------------------------------------------------------
+-- Image: a 96x96 RGB quadrant square (red / green / blue / yellow),
+-- 8 bits per channel, written straight into a pixel buffer.
+-- ----------------------------------------------------------------------------
+//#region image gen
+let side = 96;
+
+let quadrant = (y, x) => {
+  if (y < side / 2) {
+    if (x < side / 2) {
+      (255, 0, 0)
+    } else {
+      (0, 255, 0)
+    }
+  } else {
+    if (x < side / 2) {
+      (0, 0, 255)
+    } else {
+      (255, 255, 0)
+    }
+  }
+};
+
+let rec fillRow = (bytes, y, x) => {
+  if (x >= side) {
+    0
+  } else {
+    let offset = (y * side + x) * 3;
+    let (red, green, blue) = quadrant(y, x);
+    let _ = bytes :> .writeUInt8(red, offset) :> Result.withDefault(0);
+    let _ = bytes :> .writeUInt8(green, offset + 1) :> Result.withDefault(0);
+    let _ = bytes :> .writeUInt8(blue, offset + 2) :> Result.withDefault(0);
+    fillRow(bytes, y, x + 1)
+  }
+};
+
+let rec fillRows = (bytes, y) => {
+  if (y >= side) {
+    0
+  } else {
+    let _ = fillRow(bytes, y, 0);
+    fillRows(bytes, y + 1)
+  }
+};
+
+
+let allocSquare = () => {
+  match(Buffer.alloc(side * side * 3)) {
+    Err(_) => { None },
+    Ok(bytes) => {
+      let _ = fillRows(bytes, 0);
+      Some(Png.Pixels(bytes, side, side))
+    },
+  }
+};
+//#endregion
+-- ----------------------------------------------------------------------------
+-- Backend dispatch: sixel first, half-block fallback while the encoder is
+-- unimplemented (Sixel.render returns "" for now).
+-- ----------------------------------------------------------------------------
+
+let drawImage = (area: Geometry.Rect, image: Image.Image) => {
+  let sixel = sixelRender(area, Image.Fit, image);
+  if (sixel == "") {
+    HalfBlock.render(area, Image.Fit, image)
+  } else {
+    sixel
+  }
+};
+
+-- ----------------------------------------------------------------------------
+-- Event loop: quit on q / Ctrl-C, repaint the square plus a status line.
+-- ----------------------------------------------------------------------------
+
+let update = (key, image) => {
+  match((key, image)) {
+    (Event.Character("q"), _) => { Command.Quit },
+    (Event.CtrlC, _) => { Command.Quit },
+    _ => { Command.Continue(image) },
+  }
+};
+
+let render = (_, image, size: Geometry.Size) => {
+  let area = Geometry.screen(size);
+  Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
+    drawImage(area, image) ++
+    Ansi.cursorTo(size.height, 1) ++
+    `backend=${Cap.backendName(Cap.backend)} — q to quit` ++
+    Draw.endFrame ++ Ansi.endSynchronizedUpdate
+};
+
+-- ----------------------------------------------------------------------------
+-- Entry point
+-- ----------------------------------------------------------------------------
+
+let display = (image: Image.Image) => {
+  let started = Runtime.run(image, update, render);
+  Task.succeed(started)
+};
+
+let main = () => {
+  match(allocSquare()) {
+    None => { Task.succeed(print("test_wt: could not allocate pixels")) },
+    Some(pixels) => {
+      display(Image.Image("","", pixels.width, pixels.height, Some(pixels)))
+    },
+  }
+};

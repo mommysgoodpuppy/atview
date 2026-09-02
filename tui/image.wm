@@ -1,0 +1,11 @@
+from "./png.wm" import * as Png; 
+
+type Scale = Fit | Fill;
+
+record Image = {
+  base64: String, //TODO bruh
+  alt: String,
+  width: Number,
+  height: Number,
+  pixels: Option<Png.Pixels>,
+};

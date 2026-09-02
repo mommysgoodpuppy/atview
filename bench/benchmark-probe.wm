@@ -1,10 +1,10 @@
 from "./benchmark.wm" import * as Benchmark;
 
-let increment = Monad.lift Benchmark (value) => {
+let increment = Monad.via Benchmark (value) => {
   Benchmark.measure("increment", () => { value + 1 }, value)
 };
 
-let double = Monad.lift Benchmark (value) => {
+let double = Monad.via Benchmark (value) => {
   Benchmark.measure("double", () => { value * 2 }, value)
 };
 

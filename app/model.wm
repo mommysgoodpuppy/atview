@@ -217,7 +217,7 @@ let mediaValue = (resource) => {
 };
 
 let countText = (value) => {
-  value :> Option.map(Result.textOf) :> Option.withDefault("0")
+  value :> Option.map(Text.of) :> Option.withDefault("0")
 };
 
 let move = (count, delta, state) => {

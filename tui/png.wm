@@ -9,11 +9,11 @@ record Pixels = {
 };
 
 let length = (buffer) => {
-  buffer :> .length :> Result.withDefault(0)
+  buffer :> .length :> Result.debug
 };
 
 let byte = (buffer, index) => {
-  buffer :> .readUInt8(index) :> Result.withDefault(0)
+  buffer :> .readUInt8(index) :> Result.debug
 };
 
 let writeByte = (buffer, index, value) => {

@@ -7,6 +7,7 @@ from "./draw.wm" import * as Draw;
 from "./geometry.wm" import * as Geometry;
 from "./halfblock.wm" import * as HalfBlock;
 from "./kitty.wm" import * as Kitty;
+from "./image.wm" import * as Image;
 from "./terminal-cap.wm" import * as Cap;
 
 type Command =
@@ -15,7 +16,7 @@ type Command =
   | Fill<Geometry.Rect, String, Draw.Style>
   | DeleteAllImages
   | DeleteImage<Number>
-  | PlaceImage<Number, Geometry.Rect, Kitty.Scale, Kitty.Image>;
+  | PlaceImage<Number, Geometry.Rect, Image.Scale, Image.Image>;
 
 record Frame<Memory> = {
   output: String,
@@ -30,21 +31,21 @@ let rec encode = match(commands, terminal) => {
       Text(area, value, style) => { Draw.text(area, value, style) },
       Fill(area, symbol, style) => { Draw.fill(area, symbol, style) },
       DeleteAllImages => {
-        match(Cap.backend) {
-          Cap.KittyGraphics => { Kitty.deleteAll },
-          Cap.HalfBlock => { "" },
+        match(Cap.renderer) {
+          Cap.KittyRenderer => { Kitty.deleteAll },
+          Cap.HalfBlockRenderer => { "" },
         }
       },
       DeleteImage(identifier) => {
-        match(Cap.backend) {
-          Cap.KittyGraphics => { Kitty.deleteImage(identifier) },
-          Cap.HalfBlock => { "" },
+        match(Cap.renderer) {
+          Cap.KittyRenderer => { Kitty.deleteImage(identifier) },
+          Cap.HalfBlockRenderer => { "" },
         }
       },
       PlaceImage(identifier, area, scale, image) => {
-        match(Cap.backend) {
-          Cap.KittyGraphics => { Kitty.renderWithId(identifier, area, terminal, scale, image) },
-          Cap.HalfBlock => { HalfBlock.render(area, scale, image) },
+        match(Cap.renderer) {
+          Cap.KittyRenderer => { Kitty.renderWithId(identifier, area, terminal, scale, image) },
+          Cap.HalfBlockRenderer => { HalfBlock.render(area, scale, image) },
         }
       },
     };

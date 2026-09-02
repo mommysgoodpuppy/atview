@@ -25,7 +25,7 @@ let start = (feed: OwnFeed) => {
     (_, state: FeedState, size: Geometry.Size) => {
       Draw.beginFrame ++ Draw.text(
         Geometry.rect(0, 0, size.width, 1),
-        feed.handle ++ " " ++ Result.textOf(state.selected),
+        feed.handle ++ " " ++ Text.of(state.selected),
         Draw.plain,
       )
     },
