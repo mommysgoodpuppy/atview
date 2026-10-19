@@ -8,6 +8,7 @@ from "../tui/draw.wm" import * as Draw;
 from "../tui/element.wm" import * as Ui;
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
+from "../tui/image.wm" import * as Image;
 from "../tui/resource.wm" import * as Resource;
 
 let wrapOnce = (text, width) => {
@@ -225,7 +226,7 @@ let card = (area, item, size, scale, joinedBottom, avatarId) => {
           Ui.image(
             avatarId,
             Geometry.rect(area.x + 1, area.y + 1, avatarColumns, avatarRows),
-            Kitty.Fill,
+            Image.Fill,
             image,
           )
         })

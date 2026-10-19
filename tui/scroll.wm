@@ -2,7 +2,7 @@
 -- clock; this module owns easing and translating a content offset into a
 -- partially clipped list viewport.
 
-from js.global("Math") import {
+from js.global("Math") import unsafe {
   floor: Number -> Number,
 };
 
@@ -12,7 +12,7 @@ record Viewport = {
 };
 
 let halfUp = (amount) => {
-  floor((amount + 1) / 2) :> Result.withDefault(amount)
+  floor((amount + 1) / 2)
 };
 
 -- Ease halfway to the target on every frame.  Integer rows make the result

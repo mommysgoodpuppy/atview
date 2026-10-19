@@ -1,6 +1,6 @@
 from "./ansi.wm" import * as Ansi;
 from "./geometry.wm" import * as Geometry;
-from "./Image.wm" import { Image, Scale, Fit, Fill };
+from "./image.wm" import { Image, Scale, Fit, Fill };
 from "./png.wm" import * as Png;
 from "./theme.wm" import * as Theme;
 from js.global("Math") import { floor };

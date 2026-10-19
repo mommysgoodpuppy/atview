@@ -15,6 +15,7 @@ from "../tui/draw.wm" import * as Draw;
 from "../tui/element.wm" import * as Ui;
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
+from "../tui/image.wm" import * as Image;
 
 record ReplyElements = {
   element: Ui.Element,
@@ -87,7 +88,7 @@ let replyPost = (area, cursor, layout: ReplyLayout, post, avatar) => {
           layout.avatarColumns,
           layout.avatarRows,
         ),
-        Kitty.Fill,
+        Image.Fill,
         image,
       )
     }),
@@ -305,7 +306,7 @@ let threadPane = (area, state: UiState, size: Geometry.Size) => {
               avatarColumns,
               avatarRows,
             ),
-            Kitty.Fill,
+            Image.Fill,
             image,
           )
         }),

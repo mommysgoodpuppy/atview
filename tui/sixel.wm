@@ -1,6 +1,10 @@
 from "./geometry.wm" import * as Geometry;
-from "./Image.wm" import { Image, Scale };
+from "./image.wm" import { Image, Scale };
 from "./png.wm" import * as Png;
+from "./byte.wm" import * as Byte;
+from js.global("String.prototype.fromCharCode") import unsafe {
+  call as fromCharCode: Number -> Number
+};
 
 record Rgba = { 
   r: Number,
@@ -9,23 +13,74 @@ record Rgba = {
   a: Number
 };
 
+record Rgb = { 
+  r: Number,
+  g: Number,
+  b: Number,
+};
+
 record ImageRgba = { 
   width: Number,
   height: Number,
   pixels: List<Rgba>
 };
 
+type Pixel = Transparent | Color<Number>;
+
+record IndexedImage = {
+  width:Number,
+  height:Number,
+  pixels: List<Pixel>,
+  palette: List<Rgb>
+};
+
 let quantize = (img) => {
   
 };
 
-let print1pix = (pix) => {
-  print( Png.byte(pix, 0))
+let listMap = (list, fn) => {
+  let rec helper = (acc, remaining) => {
+    match (remaining) {
+      [] => {List.reverse(acc)},
+      [head, ..tail] => {helper([fn(head), ..acc], tail)}
+    }
+  };
+  helper([], list)
 };
 
-let toImgRgba = (img) => {
-  let pix = img.bytes;
+let listUnzip = (list) => {
+  let rec loop = (l, l1, l2) => {
+    match (l) {
+      [] => {(List.reverse(l1), List.reverse(l2))},
+      [(Var(x), Var(y)), ..tl] => { loop(tl, [x, ..l1], [y, ..l2])}
+    }
+  };
+  loop(list, [], [])
+};
 
+let listTake = (list, amount) => {
+  let rec helper = (acc, count, remain) => {
+    match (remain) {
+      [] => {List.reverse(acc)},
+      [x, ..xs] => {
+        if (count == 0) {List.reverse(acc)}
+        else {helper([x, ..acc], count - 1, xs)}
+      }
+    }
+  };
+  helper([],amount, list)
+};
+
+let print1pix = (pix) => {
+  print(Png.byte(pix, 0))
+};
+
+let toImgRgba = (img:Image) => {
+  let pixels = match(img.pixels) {
+    Some(p) => {p},
+    None => {?}
+  };
+  let pix = pixels.bytes;
   let rec loop = (i, reversed) => {
     if (i + 3 < Png.length(pix)) {
       let rgba = Rgba(
@@ -41,15 +96,85 @@ let toImgRgba = (img) => {
   };
 
   let pixels = loop(0, []);
-  print pixels
+  print (listTake(pixels, 1));
+  ImageRgba(img.width, img.height,pixels)
+};
+
+let toIndexed = (img:ImageRgba) => {
+  let toIndexedPixel = (pixel) => {
+    if (pixel.a < 128) {
+      (Transparent, Rgb(0,0,0))
+    } else {
+      let d = 51;
+      let r6 = pixel.r / d
+        and g6 = pixel.g / d
+        and b6 = pixel.b / d;
+      let index = r6 * 36 
+        + g6 * 6
+        + b6;
+      let r = r6 * d
+        and g = g6 * d
+        and b = b6 * d;
+      (Color(index), Rgb(r,g,b))
+    }
+  };
+               
+  let (pixels, palette) = 
+    img.pixels
+      :>listMap(toIndexedPixel)
+      :>listUnzip;
+  IndexedImage(img.width, img.height, pixels, palette)
+};
+
+
+let add = (x,y) => {x+y};
+let rec listRange = (x,y) => {
+  if (x> y) {[]} else 
+  {[x, ..listRange(x+1,y)]}
+};
+
+let encode = (img: IndexedImage) => {
+  let mask = (img:IndexedImage, color, x, y) => {
+    [0,1,2,3,4,5] :>
+      List.foldLeft(0, (dy, acc) => {
+        if (y+dy < img.height 
+          && List.at(img.pixels, (y + dy) * img.width + x) == color) 
+        {
+          Byte.lor(acc, Byte.shl(1,dy))
+        } else {
+          acc
+        } 
+      })
+  };
+  let encodeColor = 
+    (image: IndexedImage, color, bandY) =>
+  {
+    listRange(0, image.width)
+      :> List.map((x) => {
+         mask (image, color, x, bandY)
+           :> add(63) 
+           :> fromCharCode
+           :> Text.of
+      })
+      :> List.foldLeft("", (acc,ch) => {acc ++ ch})
+  };
+  
+  
+  
+  ?
+};
+
+let write = (img, writer) => {
+  
 };
 
 let render = (area: Geometry.Rect, mode: Scale, image: Image) => {
-  let pixels = match(image.pixels) {
-    Some(p) => {p}
-  };
-  let imgrgb = toImgRgba(pixels);
-  print1pix(pixels.bytes);
+
+  let imgrgb = toImgRgba(image);
+  let imgIndexed = toIndexed(imgrgb);
+  print(imgIndexed.width, imgIndexed.height);
+  let encoded = encode(imgIndexed);
+  //print1pix(pixels.bytes);
   ?;
   
   let imageQuantizedColor = quantize(image);

@@ -2,7 +2,7 @@
 -- Incremental CSI framing and lone-Escape timing are the next layer.
 
 from "./ansi.wm" import * as Ansi;
-from js.global("String") import {
+from js.global("String") import unsafe {
   fromCharCode: Number -> String,
 };
 
@@ -31,9 +31,9 @@ type NumberPrefix =
   | NumberPrefix<Number, List<String>>
   | InvalidNumberPrefix;
 
-let controlC = fromCharCode(3) :> Result.withDefault("");
-let carriageReturn = fromCharCode(13) :> Result.withDefault("");
-let backspace = fromCharCode(127) :> Result.withDefault("");
+let controlC = fromCharCode(3);
+let carriageReturn = fromCharCode(13);
+let backspace = fromCharCode(127);
 let escape = Ansi.esc;
 
 let drop = (text, count) => {

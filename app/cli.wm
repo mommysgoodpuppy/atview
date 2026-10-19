@@ -2,10 +2,10 @@ from "../proto/api.wm" import * as Api;
 from "../proto/auth.wm" import * as Auth;
 from "../proto/views.wm" import * as Views;
 from "../proto/xrpc.wm" import * as Xrpc;
-from js.global("Deno") import {
+from js.global("Deno") import unsafe {
   args: Js.Array<String>,
 };
-  from js.global import {
+from js.global import unsafe {
   Number as toNumber: String -> Number,
 };
 
@@ -137,7 +137,7 @@ let rec joinWords = match(words) => {
 
 let parseLimit = (text, fallback) => {
   match(text) {
-    None => { Ok(fallback) },
+    None => { fallback },
     Some(value) => { toNumber(value) },
   }
 };
@@ -163,7 +163,7 @@ let run = match(arguments) => {
   },
   ["feed", actor, limitText] => {
     parseLimit(Some(limitText), 10)
-      :> Task.fromResult
+      :> Task.succeed
       :> Task.mapErr(Xrpc.JavaScriptFailure)
       :> Task.andThen((limit) => {
         Api.authorFeed(actor, limit)
@@ -175,7 +175,7 @@ let run = match(arguments) => {
   },
   ["thread", uri, depthText] => {
     parseLimit(Some(depthText), 4)
-      :> Task.fromResult
+      :> Task.succeed
       :> Task.mapErr(Xrpc.JavaScriptFailure)
       :> Task.andThen((depth) => {
         Api.thread(uri, depth)
@@ -191,7 +191,7 @@ let run = match(arguments) => {
   },
   ["search", query, limitText] => {
     parseLimit(Some(limitText), 10)
-      :> Task.fromResult
+      :> Task.succeed
       :> Task.mapErr(Xrpc.JavaScriptFailure)
       :> Task.andThen((limit) => {
         Auth.login() :> Task.andThen((session) => {
@@ -206,17 +206,11 @@ let run = match(arguments) => {
 };
 
 let main = () => {
-  match(args) {
-    Err(error) => {
-      Task.succeed(print("could not read arguments: " ++ Xrpc.describeJsError(error)))
-    },
-    Ok(values) => {
-      run(Js.Array.toList(values))
-        :> Task.map(print)
-        :> Task.recover((error) => {
-          print("atview: " ++ Xrpc.describeError(error));
-          void
-        })
-    },
-  }
+  let values = args;
+  run(Js.Array.toList(values))
+    :> Task.map(print)
+    :> Task.recover((error) => {
+      print("atview: " ++ Xrpc.describeError(error));
+      void
+    })
 };

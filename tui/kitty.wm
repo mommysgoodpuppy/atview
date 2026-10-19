@@ -11,7 +11,7 @@ from "./terminal-cap.wm" import * as Cap;
 from "./image.wm" import {Image, Scale, Fit, Fill};
 from js.global import { fetch };
 from js.module("node:buffer") import { Buffer };
-from js.global("Math") import {
+from js.global("Math") import unsafe {
   ceil: Number -> Number,
   floor: Number -> Number,
 };
@@ -65,11 +65,11 @@ let rec transmitChunks = (remaining, first, placement, identifier) => {
 };
 
 let roundedUp = (value) => {
-  ceil(value) :> Result.withDefault(1)
+  ceil(value)
 };
 
 let roundedDown = (value) => {
-  floor(value) :> Result.withDefault(0)
+  floor(value)
 };
 
 let squareColumns = (rows, terminal: Geometry.Size) => {

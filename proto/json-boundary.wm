@@ -1,66 +1,56 @@
 -- Protocol JSON helpers which turn nullish/dynamic JavaScript properties into real Workman
 -- carrier values. Json.assert does not adapt record Option fields by itself.
 
-from js.global("Reflect") import {
+from js.global("Reflect") import unsafe {
   get: (Js.Object, String) -> Option<Js.Value>,
 } as Reflect;
 
 let optionalString = (body, key) => {
-  Reflect.get(body, key) :> Result.andThen((found) => {
-    match(found) {
-      None => { Ok(None) },
-      Some(raw) => {
-        let value: Result<String, Js.Error> = raw :> Json.assert;
-        value :> Result.map(Some)
-      },
-    }
-  })
+  match(Reflect.get(body, key)) {
+    None => { Ok(None) },
+    Some(raw) => {
+      let value: Result<String, Js.Error> = raw :> Json.assert;
+      value :> Result.map(Some)
+    },
+  }
 };
 
 let optionalNumber = (body, key) => {
-  Reflect.get(body, key) :> Result.andThen((found) => {
-    match(found) {
-      None => { Ok(None) },
-      Some(raw) => {
-        let value: Result<Number, Js.Error> = raw :> Json.assert;
-        value :> Result.map(Some)
-      },
-    }
-  })
+  match(Reflect.get(body, key)) {
+    None => { Ok(None) },
+    Some(raw) => {
+      let value: Result<Number, Js.Error> = raw :> Json.assert;
+      value :> Result.map(Some)
+    },
+  }
 };
 
 let requiredObject = (body, key) => {
-  Reflect.get(body, key) :> Result.andThen((found) => {
-    match(found) {
-      None => { Err(Js.Error("missing object field " ++ key)) },
-      Some(raw) => {
-        let value: Result<Js.Object, Js.Error> = raw :> Json.assert;
-        value
-      },
-    }
-  })
+  match(Reflect.get(body, key)) {
+    None => { Err(Js.Error("missing object field " ++ key)) },
+    Some(raw) => {
+      let value: Result<Js.Object, Js.Error> = raw :> Json.assert;
+      value
+    },
+  }
 };
 
 let optionalObject = (body, key) => {
-  Reflect.get(body, key) :> Result.andThen((found) => {
-    match(found) {
-      None => { Ok(None) },
-      Some(raw) => {
-        let value: Result<Js.Object, Js.Error> = raw :> Json.assert;
-        value :> Result.map(Some)
-      },
-    }
-  })
+  match(Reflect.get(body, key)) {
+    None => { Ok(None) },
+    Some(raw) => {
+      let value: Result<Js.Object, Js.Error> = raw :> Json.assert;
+      value :> Result.map(Some)
+    },
+  }
 };
 
 let optionalObjectArray = (body, key) => {
-  Reflect.get(body, key) :> Result.andThen((found) => {
-    match(found) {
-      None => { Ok(None) },
-      Some(raw) => {
-        let value: Result<Js.Array<Js.Object>, Js.Error> = raw :> Json.assert;
-        value :> Result.map(Some)
-      },
-    }
-  })
+  match(Reflect.get(body, key)) {
+    None => { Ok(None) },
+    Some(raw) => {
+      let value: Result<Js.Array<Js.Object>, Js.Error> = raw :> Json.assert;
+      value :> Result.map(Some)
+    },
+  }
 };

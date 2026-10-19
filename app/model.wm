@@ -5,12 +5,13 @@ from "../proto/views.wm" import * as Views;
 from "../proto/xrpc.wm" import { AppError };
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
+from "../tui/image.wm" import * as Image;
 from "../tui/resource.wm" import * as Resource;
 
 type FeedView = Timeline | OwnPosts;
 
 type UiThread =
-  | UiThreadPost<Views.Post, Option<Kitty.Image>, List<UiThread>>
+  | UiThreadPost<Views.Post, Option<Image.Image>, List<UiThread>>
   | UiMissingPost<String>
   | UiBlockedPost<String>
   | UiUnknownThread<String>;
@@ -32,8 +33,8 @@ record ThreadNode = {
 
 record UiPost = {
   post: FeedPost,
-  image: Resource.Resource<String, Option<Kitty.Image>>,
-  avatar: Resource.Resource<String, Option<Kitty.Image>>,
+  image: Resource.Resource<String, Option<Image.Image>>,
+  avatar: Resource.Resource<String, Option<Image.Image>>,
 };
 
 record UiFeeds = {
@@ -49,7 +50,7 @@ record UiFeeds = {
 record UiState = {
   selected: Number,
   view: FeedView,
-  imageScale: Kitty.Scale,
+  imageScale: Image.Scale,
   feeds: UiFeeds,
   loading: Bool,
   status: String,
@@ -65,14 +66,14 @@ record UiState = {
 record FeedLayout = {
   width: Number,
   size: Geometry.Size,
-  scale: Kitty.Scale,
+  scale: Image.Scale,
 };
 
 record WindowLayout = {
   width: Number,
   height: Number,
   size: Geometry.Size,
-  scale: Kitty.Scale,
+  scale: Image.Scale,
 };
 
 record CardCursor = {
@@ -141,7 +142,7 @@ record ThreadRegion = {
   selected: Number,
   scrolling: Bool,
   renderVersion: Number,
-  imageScale: Kitty.Scale,
+  imageScale: Image.Scale,
   threadKey: String,
   size: Geometry.Size,
 };
@@ -240,13 +241,13 @@ let move = (count, delta, state) => {
 };
 
 let toggleImageScale = match(scale) => {
-  Kitty.Fit => { Kitty.Fill },
-  Kitty.Fill => { Kitty.Fit },
+  Image.Fit => { Image.Fill },
+  Image.Fill => { Image.Fit },
 };
 
 let imageScaleName = match(scale) => {
-  Kitty.Fit => { "fit" },
-  Kitty.Fill => { "fill" },
+  Image.Fit => { "fit" },
+  Image.Fill => { "fill" },
 };
 
 let postsFor = match(feeds, view) => {

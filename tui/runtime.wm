@@ -9,15 +9,15 @@ from "./geometry.wm" import * as Geometry;
 from "./surface.wm" import * as Surface;
 from js.module("node:tty") import type { ReadStream, WriteStream };
 from js.module("node:events") import { once as onceEvent };
-from js.global("process") import {
+from js.global("process") import unsafe {
   stdin: ReadStream,
   stdout: WriteStream,
   exit: Number -> Void,
 };
-from js.global("Reflect") import {
+from js.global("Reflect") import unsafe {
   get: (Js.Value, String) -> Option<Js.Value>,
 } as Reflect;
-from js.global import {
+from js.global import unsafe {
   String as toString: Js.Value -> String,
 };
 
@@ -28,9 +28,8 @@ let errorText = match(error) => {
 
 let propertyNumber = (target, name, fallback) => {
   match(Reflect.get(target, name)) {
-    Err(_) => { fallback },
-    Ok(None) => { fallback },
-    Ok(Some(raw)) => {
+    None => { fallback },
+    Some(raw) => {
       let decoded: Result<Number, Js.Error> = raw :> Json.assert;
       decoded :> Result.withDefault(fallback)
     },
@@ -54,10 +53,7 @@ let restore = (input, output, status) => {
   let _ = input.setRawMode(false);
   let _ = input.pause();
   let _ = write(output, Ansi.leave);
-  match(exit(status)) {
-    Ok(_) => { void },
-    Err(_) => { void },
-  }
+  exit(status);
 };
 
 let draw = (output, render, previous, running) => {
@@ -75,62 +71,56 @@ let draw = (output, render, previous, running) => {
 
 let rec listen = (input, output, update, render, running, previous) => {
   match(input.once("data", (chunk) => {
-    match(toString(chunk)) {
-      Err(_) => {
-        restore(input, output, 1)
+    let raw = toString(chunk);
+    match(applyEvents(update, Event.decodeMany(raw), running)) {
+      Quit => {
+        restore(input, output, 0)
       },
-      Ok(raw) => {
-        match(applyEvents(update, Event.decodeMany(raw), running)) {
-          Quit => {
-            restore(input, output, 0)
-          },
-          Continue(next) => {
-            match(draw(output, render, previous, next)) {
-              Err(_) => { restore(input, output, 1) },
-              Ok(snapshot) => {
-                listen(input, output, update, render, next, Some(snapshot))
-              },
-            }
-          },
-          Await(pendingRunning, task) => {
-            match(draw(output, render, previous, pendingRunning)) {
-              Err(_) => { restore(input, output, 1) },
-              Ok(pendingSnapshot) => {
-                let _ = task
-                  :> Task.map((nextRunning) => {
-                    match(draw(
-                      output,
-                      render,
-                      Some(pendingSnapshot),
-                      nextRunning,
-                    )) {
-                      Err(_) => { restore(input, output, 1) },
-                      Ok(snapshot) => {
-                        listen(
-                          input,
-                          output,
-                          update,
-                          render,
-                          nextRunning,
-                          Some(snapshot),
-                        )
-                      },
-                    }
-                  })
-                  :> Task.recover((_) => {
-                    restore(input, output, 1)
-                  });
-                void
-              },
-            }
-          },
-          Spawn(_pending, _task) => {
-            restore(input, output, 1)
-          },
-          SpawnMany(_pending, _tasks) => {
-            restore(input, output, 1)
+      Continue(next) => {
+        match(draw(output, render, previous, next)) {
+          Err(_) => { restore(input, output, 1) },
+          Ok(snapshot) => {
+            listen(input, output, update, render, next, Some(snapshot))
           },
         }
+      },
+      Await(pendingRunning, task) => {
+        match(draw(output, render, previous, pendingRunning)) {
+          Err(_) => { restore(input, output, 1) },
+          Ok(pendingSnapshot) => {
+            let _ = task
+              :> Task.map((nextRunning) => {
+                match(draw(
+                  output,
+                  render,
+                  Some(pendingSnapshot),
+                  nextRunning,
+                )) {
+                  Err(_) => { restore(input, output, 1) },
+                  Ok(snapshot) => {
+                    listen(
+                      input,
+                      output,
+                      update,
+                      render,
+                      nextRunning,
+                      Some(snapshot),
+                    )
+                  },
+                }
+              })
+              :> Task.recover((_) => {
+                restore(input, output, 1)
+              });
+            void
+          },
+        }
+      },
+      Spawn(_pending, _task) => {
+        restore(input, output, 1)
+      },
+      SpawnMany(_pending, _tasks) => {
+        restore(input, output, 1)
       },
     }
   })) {
@@ -140,43 +130,31 @@ let rec listen = (input, output, update, render, running, previous) => {
 };
 
 let run = (initial, update, render) => {
-  match(stdin) {
+  let input = stdin;
+  let output = stdout;
+  match(input.setRawMode(true)) {
     Err(error) => {
-      print("terminal unavailable: " ++ errorText(error))
+      print("could not enable raw mode (is stdin a terminal?): " ++ errorText(error))
     },
-    Ok(input) => {
-      match(stdout) {
-        Err(error) => {
-          print("terminal output unavailable: " ++ errorText(error))
-        },
-        Ok(output) => {
-          match(input.setRawMode(true)) {
-            Err(error) => {
-              print("could not enable raw mode (is stdin a terminal?): " ++ errorText(error))
-            },
-            Ok(_) => {
-              let initialRunning = (initial, 1, 2);
-              let initialSize = terminalSize(output, 1, 2);
-              let _ = input.resume();
-              match(write(
-                output,
-                Ansi.enter ++ Ansi.queryCellSize ++
-                  render(None, initial, initialSize),
-              )) {
-                Err(_) => { restore(input, output, 1) },
-                Ok(_) => {
-                  listen(
-                    input,
-                    output,
-                    update,
-                    render,
-                    initialRunning,
-                    Some((initial, initialSize)),
-                  )
-                },
-              }
-            },
-          }
+    Ok(_) => {
+      let initialRunning = (initial, 1, 2);
+      let initialSize = terminalSize(output, 1, 2);
+      let _ = input.resume();
+      match(write(
+        output,
+        Ansi.enter ++ Ansi.queryCellSize ++
+          render(None, initial, initialSize),
+      )) {
+        Err(_) => { restore(input, output, 1) },
+        Ok(_) => {
+          listen(
+            input,
+            output,
+            update,
+            render,
+            initialRunning,
+            Some((initial, initialSize)),
+          )
         },
       }
     },
@@ -197,7 +175,7 @@ let inputEvents = (input) => {
         [] => { Task.succeed([]) },
         [chunk, .._] => {
           toString(chunk)
-            :> Task.fromResult
+            :> Task.succeed
             :> Task.map(Event.decodeMany)
         },
       }
@@ -288,74 +266,68 @@ let rec waitRetained = (
 
 let rec listenRetained = (input, output, update, render, running, memory) => {
   match(input.once("data", (chunk) => {
-    match(toString(chunk)) {
-      Err(_) => {
-        restore(input, output, 1)
+    let raw = toString(chunk);
+    match(applyEvents(update, Event.decodeMany(raw), running)) {
+      Quit => {
+        restore(input, output, 0)
       },
-      Ok(raw) => {
-        match(applyEvents(update, Event.decodeMany(raw), running)) {
-          Quit => {
-            restore(input, output, 0)
-          },
-          Continue(next) => {
-            match(drawRetained(output, render, Some(memory), next)) {
-              Err(_) => { restore(input, output, 1) },
-              Ok(nextMemory) => {
-                listenRetained(
-                  input,
-                  output,
-                  update,
-                  render,
-                  next,
-                  nextMemory,
-                )
-              },
-            }
-          },
-          Await(pendingRunning, task) => {
-            match(drawRetained(
+      Continue(next) => {
+        match(drawRetained(output, render, Some(memory), next)) {
+          Err(_) => { restore(input, output, 1) },
+          Ok(nextMemory) => {
+            listenRetained(
+              input,
               output,
+              update,
               render,
-              Some(memory),
-              pendingRunning,
-            )) {
-              Err(_) => { restore(input, output, 1) },
-              Ok(pendingMemory) => {
-                let _ = task
-                  :> Task.map((nextRunning) => {
-                    match(drawRetained(
-                      output,
-                      render,
-                      Some(pendingMemory),
-                      nextRunning,
-                    )) {
-                      Err(_) => { restore(input, output, 1) },
-                      Ok(nextMemory) => {
-                        listenRetained(
-                          input,
-                          output,
-                          update,
-                          render,
-                          nextRunning,
-                          nextMemory,
-                        )
-                      },
-                    }
-                  })
-                  :> Task.recover((_) => {
-                    restore(input, output, 1)
-                  });
-                void
-              },
-            }
-          },
-          Spawn(_pending, _task) => {
-            restore(input, output, 1)
-          },
-          SpawnMany(_pending, _tasks) => {
-            restore(input, output, 1)
+              next,
+              nextMemory,
+            )
           },
         }
+      },
+      Await(pendingRunning, task) => {
+        match(drawRetained(
+          output,
+          render,
+          Some(memory),
+          pendingRunning,
+        )) {
+          Err(_) => { restore(input, output, 1) },
+          Ok(pendingMemory) => {
+            let _ = task
+              :> Task.map((nextRunning) => {
+                match(drawRetained(
+                  output,
+                  render,
+                  Some(pendingMemory),
+                  nextRunning,
+                )) {
+                  Err(_) => { restore(input, output, 1) },
+                  Ok(nextMemory) => {
+                    listenRetained(
+                      input,
+                      output,
+                      update,
+                      render,
+                      nextRunning,
+                      nextMemory,
+                    )
+                  },
+                }
+              })
+              :> Task.recover((_) => {
+                restore(input, output, 1)
+              });
+            void
+          },
+        }
+      },
+      Spawn(_pending, _task) => {
+        restore(input, output, 1)
+      },
+      SpawnMany(_pending, _tasks) => {
+        restore(input, output, 1)
       },
     }
   })) {
@@ -371,49 +343,37 @@ let runRetainedManaged = (
   update,
   render,
 ) => {
-  match(stdin) {
+  let input = stdin;
+  let output = stdout;
+  match(input.setRawMode(true)) {
     Err(error) => {
-      print("terminal unavailable: " ++ errorText(error))
+      print("could not enable raw mode (is stdin a terminal?): " ++ errorText(error))
     },
-    Ok(input) => {
-      match(stdout) {
-        Err(error) => {
-          print("terminal output unavailable: " ++ errorText(error))
-        },
-        Ok(output) => {
-          match(input.setRawMode(true)) {
-            Err(error) => {
-              print("could not enable raw mode (is stdin a terminal?): " ++ errorText(error))
-            },
-            Ok(_) => {
-              let initialRunning = (initial, 1, 2);
-              let initialSize = terminalSize(output, 1, 2);
-              let initialFrame = render(None, initial, initialSize);
-              let _ = input.resume();
-              match(write(
-                output,
-                Ansi.enter ++ Ansi.queryCellSize ++ initialFrame.output,
-              )) {
-                Err(_) => { restore(input, output, 1) },
-                Ok(_) => {
-                  let queued = enqueue(initialTasks, [], 0);
-                  let (pending, nextId) = queued;
-                  waitRetained(
-                    input,
-                    output,
-                    update,
-                    render,
-                    initialRunning,
-                    initialFrame.memory,
-                    pending,
-                    nextId,
-                    inputEvents(input),
-                    settle,
-                  )
-                },
-              }
-            },
-          }
+    Ok(_) => {
+      let initialRunning = (initial, 1, 2);
+      let initialSize = terminalSize(output, 1, 2);
+      let initialFrame = render(None, initial, initialSize);
+      let _ = input.resume();
+      match(write(
+        output,
+        Ansi.enter ++ Ansi.queryCellSize ++ initialFrame.output,
+      )) {
+        Err(_) => { restore(input, output, 1) },
+        Ok(_) => {
+          let queued = enqueue(initialTasks, [], 0);
+          let (pending, nextId) = queued;
+          waitRetained(
+            input,
+            output,
+            update,
+            render,
+            initialRunning,
+            initialFrame.memory,
+            pending,
+            nextId,
+            inputEvents(input),
+            settle,
+          )
         },
       }
     },

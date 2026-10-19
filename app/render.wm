@@ -10,6 +10,8 @@ from "../tui/kitty.wm" import * as Kitty;
 from "../tui/reactive.wm" import * as Reactive;
 from "../tui/scroll.wm" import * as Scroll;
 from "../tui/surface.wm" import * as Surface;
+from "../tui/image.wm" import * as Image;
+
 
 let threadKey = match(thread) => {
   ThreadLoading(uri) => { "loading:" ++ uri },
@@ -74,8 +76,8 @@ let sameView = match(left, right) => {
 };
 
 let sameScale = match(left, right) => {
-  (Kitty.Fit, Kitty.Fit) => { true },
-  (Kitty.Fill, Kitty.Fill) => { true },
+  (Image.Fit, Image.Fit) => { true },
+  (Image.Fill, Image.Fill) => { true },
   _ => { false },
 };
 

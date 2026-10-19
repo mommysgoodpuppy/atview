@@ -8,6 +8,7 @@ from "./draw.wm" import * as Draw;
 from "./geometry.wm" import * as Geometry;
 from "./halfblock.wm" import * as HalfBlock;
 from "./kitty.wm" import * as Kitty;
+from "./image.wm" import * as Image;
 from "./resource.wm" import * as Resource;
 from "./terminal-cap.wm" import * as Cap;
 
@@ -19,7 +20,7 @@ type Element =
   | Fill<Geometry.Rect, String, Draw.Style>
   | Box<Geometry.Rect, String, Bool>
   | TimelineBox<Geometry.Rect, Bool, Bool, Bool>
-  | Image<Number, Geometry.Rect, Kitty.Scale, Kitty.Image>;
+  | Image<Number, Geometry.Rect, Image.Scale, Image.Image>;
 
 let empty = Empty;
 

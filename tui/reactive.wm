@@ -114,6 +114,8 @@ let fnError = (_) => {
   }
 };
 
+let mapErr = (reactive, _) => {reactive};
+
 let carrier = .{
   fn = fn,
   fnError = fnError,
@@ -121,6 +123,7 @@ let carrier = .{
   map = map,
   map2 = map2,
   andThen = andThen,
+  mapErr = mapErr
 };
 
 let effect = (id, formula) => {

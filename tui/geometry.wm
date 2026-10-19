@@ -1,7 +1,7 @@
 -- Integer terminal geometry. Coordinates are zero-based inside the library;
 -- ANSI conversion happens only in the drawing layer.
 
-from js.global("Math") import {
+from js.global("Math") import unsafe {
   floor: Number -> Number,
 };
 
@@ -90,7 +90,6 @@ let splitRows = (area, requestedTop, gap) => {
 
 let percentOf = (total, percent) => {
   floor(total * clamp(0, 100, percent) / 100)
-    :> Result.withDefault(0)
 };
 
 let aspectColumns = (
@@ -111,7 +110,7 @@ let aspectColumns = (
     floor(
       rows * terminal.cellHeight * widthRatio /
         (heightRatio * terminal.cellWidth),
-    ) :> Result.withDefault(0)
+    )
   }
 };
 

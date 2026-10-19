@@ -3,7 +3,7 @@
 from "./xrpc.wm" import * as Xrpc;
 from js.global("Deno") import { readTextFile };
 from js.global import { fetch };
-from js.global("JSON") import {
+from js.global("JSON") import unsafe {
   stringify: Js.Value -> String,
 } as JSON;
 
@@ -99,7 +99,7 @@ let createSession = (credentials) => {
     JSON.stringify(JSON{
       identifier: identifier,
       password: password,
-    }) :> Task.fromResult
+    }) :> Task.succeed
   };
   let request = Monad.viaError Task Xrpc.JavaScriptFailure (body) => {
     fetch(

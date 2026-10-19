@@ -1,6 +1,6 @@
 from "./png.wm" import * as Png;
 from js.global import type { Uint8Array };
-from js.module("jsr:@img/png@0.1.6") import {
+from js.module("jsr:@img/png@0.1.6") import unsafe {
   decodePNG: Uint8Array -> Task<Js.Object, Js.Error>,
 };
 from js.module("node:buffer") import { Buffer };

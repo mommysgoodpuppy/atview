@@ -1,0 +1,146 @@
+-- Byte helpers for code that misses `<<`, `>>`, `&`, `|`, `^`, `~`.
+-- Pure Workman (no bit operators, no Math import): all values stay exact
+-- because every halving subtracts the `% 2` remainder before dividing.
+-- Precondition: values are 0-255, shift counts are >= 0.
+
+let normalize = (value) => {
+  value % 256
+};
+
+let rec shlLoop = (value, count) => {
+  if (count <= 0) {
+    value
+  } else {
+    shlLoop((value * 2) % 256, count - 1)
+  }
+};
+
+-- `<<` (JS/C) / `lsl` (OCaml). Logical left shift, result wrapped to 0-255.
+let shl = (value, bits) => {
+  if (bits <= 0) {
+    normalize(value)
+  } else {
+    shlLoop(normalize(value), bits)
+  }
+};
+
+let rec shrLoop = (value, count) => {
+  if (count <= 0) {
+    value
+  } else {
+    shrLoop((value - value % 2) / 2, count - 1)
+  }
+};
+
+-- `>>` / `>>>` zero-fill (JS/C) / `lsr` (OCaml). Logical right shift (zero fill).
+let shr = (value, bits) => {
+  if (bits <= 0) {
+    normalize(value)
+  } else {
+    shrLoop(normalize(value), bits)
+  }
+};
+
+let rec andLoop = (left, right, place, acc) => {
+  if (place >= 256) {
+    acc
+  } else {
+    let lbit = left % 2;
+    let rbit = right % 2;
+    let next = if (lbit == 1 && rbit == 1) { acc + place } else { acc };
+    andLoop((left - lbit) / 2, (right - rbit) / 2, place * 2, next)
+  }
+};
+
+-- `&` (JS/C) / `land` (OCaml).
+let band = (left, right) => {
+  andLoop(normalize(left), normalize(right), 1, 0)
+};
+
+let rec orLoop = (left, right, place, acc) => {
+  if (place >= 256) {
+    acc
+  } else {
+    let lbit = left % 2;
+    let rbit = right % 2;
+    let next = if (lbit == 1 || rbit == 1) { acc + place } else { acc };
+    orLoop((left - lbit) / 2, (right - rbit) / 2, place * 2, next)
+  }
+};
+
+-- `|` (JS/C) / `lor` (OCaml).
+let bor = (left, right) => {
+  orLoop(normalize(left), normalize(right), 1, 0)
+};
+
+let rec xorLoop = (left, right, place, acc) => {
+  if (place >= 256) {
+    acc
+  } else {
+    let lbit = left % 2;
+    let rbit = right % 2;
+    let next = if (lbit != rbit) { acc + place } else { acc };
+    xorLoop((left - lbit) / 2, (right - rbit) / 2, place * 2, next)
+  }
+};
+
+-- `^` (JS/C) / `lxor` (OCaml).
+let bxor = (left, right) => {
+  xorLoop(normalize(left), normalize(right), 1, 0)
+};
+
+-- `~` (JS/C) / `lnot` (OCaml): flip all 8 bits.
+let bnot = (value) => {
+  255 - normalize(value)
+};
+
+-- `1 << n`: single-bit mask, wrapped to a byte.
+let bit = (n) => {
+  shl(1, n)
+};
+
+-- Tests bit n: `(value >> n) & 1`.
+let has = (value, n) => {
+  shr(value, n) % 2 == 1
+};
+
+-- Sets bit n: `value | (1 << n)`.
+let set = (value, n) => {
+  bor(value, bit(n))
+};
+
+-- Clears bit n: `value & ~(1 << n)`.
+let clear = (value, n) => {
+  band(value, bnot(bit(n)))
+};
+
+-- Flips bit n: `value ^ (1 << n)`.
+let toggle = (value, n) => {
+  bxor(value, bit(n))
+};
+
+-- OCaml-spelled aliases for `lsl` / `lsr` / `land` / `lor` / `lxor` users.
+-- `lsl` == `<<` == `shl`.
+let lsl = (value, bits) => {
+  shl(value, bits)
+};
+
+-- `lsr` == `>>`/`>>>` == `shr`.
+let lsr = (value, bits) => {
+  shr(value, bits)
+};
+
+-- `land` == `&` == `band`.
+let land = (left, right) => {
+  band(left, right)
+};
+
+-- `lor` == `|` == `bor`.
+let lor = (left, right) => {
+  bor(left, right)
+};
+
+-- `lxor` == `^` == `bxor`.
+let lxor = (left, right) => {
+  bxor(left, right)
+};

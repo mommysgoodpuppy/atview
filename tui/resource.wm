@@ -60,6 +60,7 @@ let carrier = .{
   map = map,
   map2 = map2,
   andThen = andThen,
+  mapErr = mapError
 };
 
 let resolve = match(resource, pending, failed, ready) => {
