@@ -123,6 +123,46 @@ let text = (area, value, style) => {
   at(area.x, area.y, truncate(value, area.width), style)
 };
 
+-- A horizontally scrolled text slice. Markers replace edge characters, so
+-- clipped output always stays inside the available width (even at width one).
+let textSlice = (value, offset, width, marker) => {
+  let cleaned = safeText(value);
+  let size = cleaned :> .length :> Result.withDefault(0);
+  let start = Geometry.nonNegative(offset);
+  if (width <= 0 || start >= size) { "" } else {
+    let prefix = if (start > 0) { truncate(marker, width) } else { "" };
+    let prefixWidth = prefix :> .length :> Result.withDefault(0);
+    let suffix = if (size > start + width) { truncate(marker, width - prefixWidth) } else { "" };
+    let suffixWidth = suffix :> .length :> Result.withDefault(0);
+    let content = cleaned :> .slice(start + prefixWidth, start + width - suffixWidth) :> Result.withDefault("");
+    prefix ++ content ++ suffix
+  }
+};
+
+-- The logical text rectangle and its viewport are separate. This supports
+-- partially visible widgets without resizing or dropping the whole widget.
+let textViewport = (area, viewport, value, marker, style) => {
+  let visible = Geometry.intersect(area, viewport);
+  if (visible.width <= 0 || visible.height <= 0 || visible.y != area.y) { "" } else {
+    at(visible.x, visible.y, textSlice(value, visible.x - area.x, visible.width, marker), style)
+  }
+};
+let ellipsizedText = (area, value, style) => {
+  textViewport(area, area, value, "..", style)
+};
+let linesViewport = (area, viewport, values, marker, style) => {
+  let visible = Geometry.intersect(area, viewport);
+  let rec rows = match(remaining, y, count) => {
+    ([], _, _) => { "" },
+    (_, _, 0) => { "" },
+    ([line, ..tail], _, _) => {
+      textViewport(Geometry.rect(area.x, y, area.width, 1), visible, line, marker, style) ++
+        rows(tail, y + 1, count - 1)
+    },
+  };
+  rows(List.drop(values, Geometry.nonNegative(visible.y - area.y)), visible.y, visible.height)
+};
+
 let fill = (area, symbol, style) => {
   let rec rows = (remaining, y) => {
     if (remaining <= 0) {

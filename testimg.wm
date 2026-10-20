@@ -9,6 +9,7 @@ from "./tui/event.wm" import * as Event;
 from "./tui/geometry.wm" import * as Geometry;
 from "./tui/kitty.wm" import * as Kitty;
 from "./tui/runtime.wm" import * as Runtime;
+from "./tui/image.wm" import * as Image;
 
 let uri = "at://sadlyitsbradleybot.bsky.social/app.bsky.feed.post/3mruickdkdr2c";
 
@@ -37,11 +38,11 @@ let update = match(key, image) => {
 let render = (_, image, size: Geometry.Size) => {
   let area = Geometry.screen(size);
   Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
-    Ui.render(size, Ui.image(1, area, Kitty.Fit, image)) ++
+    Ui.render(size, Ui.image(1, area, Image.Fit, image)) ++
     Draw.endFrame ++ Ansi.endSynchronizedUpdate
 };
 
-let display = (image: Kitty.Image) => {
+let display = (image: Image.Image) => {
   let started = Runtime.run(image, update, render);
   Task.succeed(started)
 };

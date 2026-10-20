@@ -1,0 +1,75 @@
+-- Offline regression: selection-only navigation must retain feed images.
+from "./model.wm" import *;
+from "./render.wm" import * as Render;
+from "./update.wm" import { beginScroll, scrollFrameState };
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../tui/ansi.wm" import * as Ansi;
+from "../tui/command.wm" import * as Command;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/kitty.wm" import * as Kitty;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/resource.wm" import * as Resource;
+from "../tui/surface.wm" import * as Surface;
+
+let expect = (condition, label) => {
+  if (condition) { void } else { Panic(label) }
+};
+let includes = (text: String, needle: String) => {
+  needle != "" && (text :> .includes(needle) :> Result.withDefault(false))
+};
+let post = (uri) => {
+  UiPost(
+    FeedPost(uri, "body", "today", "test.example", "Test", None, None, None, None, None, "test-cid", None),
+    Resource.Ready(None),
+    Resource.Ready(Some(Image.Image(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=",
+      "avatar", 1, 1, None,
+    ))),
+  )
+};
+let animated = (state: UiState) => {
+  match(beginScroll(Command.Continue(state))) {
+    Command.SpawnMany(next, _) => { next },
+    _ => { Panic("expected animation state") },
+  }
+};
+let expectRetained = (output) => {
+  expect(!includes(output, Ansi.clear), "selection-only navigation must not clear the screen");
+  expect(!includes(output, Kitty.deleteAll), "selection-only navigation must not delete feed images");
+  expect(!includes(output, Kitty.deleteImage(1000)), "must retain feed avatar placements");
+  expect(!includes(output, Kitty.deleteImage(100000)), "must retain feed media placements");
+  expect(!includes(output, "a=T"), "selection-only navigation must not retransmit images");
+  expect(!includes(output, "body"), "selection-only navigation must not redraw feed text");
+};
+let main = () => {
+  let feeds = makeUiFeeds("test", "did:test", "", [post("1"), post("2"), post("3"), post("4"), post("5"), post("6")], [], None, None);
+  let initial = UiState(0, Timeline, Image.Fit, feeds, false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+  -- Single-pane geometry isolates the feed from legitimate thread image updates.
+  let size = Geometry.Size(40, 30, 8, 16);
+  let first = Render.render(None, initial, size);
+  let downState = animated(move(6, 1, initial));
+  let down = Render.render(Some(first.memory), downState, size);
+  expectRetained(down.output);
+  expect(!down.memory.model.state.scrolling, "stationary viewport must keep media visible");
+  expect(down.memory.model.scrollOffset == 0, "first move must stay in viewport");
+  expect(down.output != "", "selection border still needs updating");
+  let tickState = scrollFrameState(downState, downState.scrollVersion, 1, true);
+  let tick = Render.render(Some(down.memory), tickState, size);
+  expect(tick.output == "", "idle animation ticks must emit no terminal commands");
+  let upState = animated(move(6, -1, tickState));
+  let up = Render.render(Some(tick.memory), upState, size);
+  expectRetained(up.output);
+  let small = Geometry.Size(40, 10, 8, 16);
+  let smallFirst = Render.render(None, initial, small);
+  let movingState = animated(move(6, 3, initial));
+  let moving = Render.render(Some(smallFirst.memory), movingState, small);
+  expect(moving.memory.model.scrollOffset > 0, "actual viewport scrolling must still move");
+  expect(moving.memory.model.state.scrolling, "moving viewport should still hide media during animation");
+  let stoppedState = scrollFrameState(movingState, movingState.scrollVersion, 8, false);
+  let stopped = Render.render(Some(moving.memory), stoppedState, small);
+  expect(!stopped.memory.model.state.scrolling, "settled viewport must restore media");
+  expect(stopped.memory.model.scrollOffset == stopped.memory.model.scrollTarget, "settled viewport must reach target");
+  print("navigation probe: ok")
+};

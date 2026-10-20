@@ -1,9 +1,8 @@
 -- ============================================================================
 -- test_wt — draws a synthetic RGB square through the detected image backend.
 --
--- Under Windows Terminal (WT_SESSION) the backend is Sixel; until the
--- hand-written sixel encoder exists in tui/sixel.wm, it falls back to the
--- half-block renderer.
+-- Under Windows Terminal (WT_SESSION) the backend is Sixel and the square is
+-- encoded by tui/sixel.wm. Half-block renderers fall back to tui/halfblock.wm.
 -- ============================================================================
 
 from "./tui/ansi.wm" import * as Ansi;
@@ -77,12 +76,12 @@ let allocSquare = () => {
 };
 //#endregion
 -- ----------------------------------------------------------------------------
--- Backend dispatch: sixel first, half-block fallback while the encoder is
--- unimplemented (Sixel.render returns "" for now).
+-- Backend dispatch: sixel first, half-block fallback when there is nothing to
+-- encode (no pixels and no decodable base64).
 -- ----------------------------------------------------------------------------
 
-let drawImage = (area: Geometry.Rect, image: Image.Image) => {
-  let sixel = sixelRender(area, Image.Fit, image);
+let drawImage = (area: Geometry.Rect, size: Geometry.Size, image: Image.Image) => {
+  let sixel = sixelRender(area, size, Image.Fit, image);
   if (sixel == "") {
     HalfBlock.render(area, Image.Fit, image)
   } else {
@@ -105,7 +104,7 @@ let update = (key, image) => {
 let render = (_, image, size: Geometry.Size) => {
   let area = Geometry.screen(size);
   Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
-    drawImage(area, image) ++
+    drawImage(area, size, image) ++
     Ansi.cursorTo(size.height, 1) ++
     `backend=${Cap.backendName(Cap.backend)} — q to quit` ++
     Draw.endFrame ++ Ansi.endSynchronizedUpdate

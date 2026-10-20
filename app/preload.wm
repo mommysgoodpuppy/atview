@@ -1,0 +1,168 @@
+-- Project spatial and semantic navigation reachability into resource work.
+from "./model.wm" import *;
+from "./data.wm" import * as Data;
+from "./feed-view.wm" import * as Feed;
+from "./render.wm" import * as Render;
+from "./tabs.wm" import * as Tabs;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/reachability.wm" import * as Reach;
+from "../tui/scroll.wm" import * as Scroll;
+from "../tui/command.wm" import * as Command;
+from "../tui/element.wm" import * as Ui;
+-- The retained projection exposes these nominal types in its signature.
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/surface.wm" import * as Surface;
+
+let rec concatMap = match(items, transform) => {
+  ([], _) => { [] },
+  ([item, ..tail], _) => { List.append(transform(item), concatMap(tail, transform)) },
+};
+
+let neighboringViews = (state: UiState) => {
+  let count = List.length(state.feeds.tabs);
+  let index = activeTabIndex(state);
+  let indices = [if (index <= 0) { count - 1 } else { index - 1 }, if (index + 1 >= count) { 0 } else { index + 1 }];
+  List.foldLeft(indices, []: List<FeedView>, (known, position) => {
+    match(List.at(state.feeds.tabs, position)) {
+      None => { known },
+      Some(tab) => {
+        if (sameView(tab.view, state.view) || List.find(known, (view) => { sameView(view, tab.view) }) != None) { known } else {
+          List.append(known, [tab.view])
+        }
+      },
+    }
+  })
+};
+let stripFor = (state: UiState, view, size: Geometry.Size) => {
+  let split = panes(contentBody(size), size);
+  Scroll.Strip(Feed.cardHeights(postsFor(state.feeds, view), FeedLayout(split.feed.width, size, state.imageScale)), split.feed.height, 1)
+};
+let windowFor = (strip: Scroll.Strip, width, offset, before, after) => {
+  let content = Geometry.rect(0, 0, width, Scroll.contentExtent(strip.extents, strip.overlap));
+  let visible = Geometry.rect(0, Scroll.limit(strip, offset), width, strip.viewport);
+  Reach.expand(visible, content, 0, strip.viewport * before, 0, strip.viewport * after)
+};
+let surfacesFrom = (projected: RenderModel, state: UiState, size: Geometry.Size) => {
+  let split = panes(contentBody(size), size);
+  let strip = stripFor(state, state.view, size);
+  let active = Reach.Surface(state.view, windowFor(strip, split.feed.width, projected.scrollOffset, 2, 4), 0);
+  let destination = windowFor(strip, split.feed.width, projected.scrollTarget, 2, 4);
+  -- The animated destination is nearby even during a large jump, but does not
+  -- displace the current visible frame in the resource priority order.
+  let moving = Reach.Surface(state.view, Reach.Viewport(Geometry.rect(0, 0, 0, 0), destination.nearby), 0);
+  let linked = neighboringViews(state) :> concatMap((view) => {
+    let tab = tabValue(state.feeds, view);
+    let neighborStrip = stripFor(state, view, size);
+    let first = Reach.Surface(view, windowFor(neighborStrip, split.feed.width, 0, 0, 0), 1);
+    let landing = Scroll.reveal(neighborStrip, tab.selected, 0);
+    [first, Reach.Surface(view, windowFor(neighborStrip, split.feed.width, landing, 0, 0), 1)]
+  });
+  [active, moving, ..linked]
+};
+let surfaces = (previous, state, size) => { surfacesFrom(Render.project(previous, state, size), state, size) };
+let candidatesFor = (state: UiState, size: Geometry.Size, views) => {
+  let width = panes(contentBody(size), size);
+  state.feeds.tabs :> List.filter((tab) => { List.find(views, (view) => { sameView(view, tab.view) }) != None }) :> concatMap((tab) => {
+    let layout = FeedLayout(width.feed.width, size, state.imageScale);
+    let rec rows = match(posts, offset) => {
+      ([], _) => { [] },
+      ([post, ..tail], _) => {
+        let height = Feed.cardHeight(layout.width, size, layout.scale, post);
+        let request = Data.MediaRequest(tab.view, post.post.uri, true);
+        [Reach.Candidate(tab.view, Geometry.rect(0, offset + 1, layout.width, Geometry.nonNegative(height - 2)), request),
+          ..rows(tail, offset + height - 1)]
+      },
+    };
+    rows(tab.posts, 0)
+  })
+};
+let candidates = (state: UiState, size) => {
+  candidatesFor(state, size, state.feeds.tabs :> List.map((tab) => { tab.view }))
+};
+let planWindows = (state: UiState, size, windows, loadMedia, requestPage) => {
+  let views = windows :> List.map((surface) => { surface.key });
+  let ranked = Reach.rank(windows, candidatesFor(state, size, views), sameView);
+  let media = Data.planMediaRequestsWith(state, ranked :> List.map((item) => { item.value }), 16, loadMedia);
+  let pages = Tabs.firstPagePlanWith(media.state, neighboringViews(media.state), requestPage);
+  MediaPlan(pages.state, List.append(media.tasks, pages.tasks))
+};
+let planWith = (previous, state, size, loadMedia, requestPage) => {
+  planWindows(state, size, surfaces(previous, state, size), loadMedia, requestPage)
+};
+let plan = (previous, state, size) => {
+  planWith(previous, state, size, Data.postMediaTask, Tabs.requestPageFor)
+};
+let warmRegion = (state: UiState, size: Geometry.Size, view, bounds: Geometry.Rect, origin) => {
+  if (bounds.width <= 0 || bounds.height <= 0) { void } else {
+    let split = panes(contentBody(size), size);
+    let strip = stripFor(state, view, size);
+    let viewport = Scroll.locateAxis(strip, bounds.y);
+    let nearby = Geometry.rect(split.feed.x, split.feed.y + bounds.y - origin, split.feed.width, bounds.height);
+    let area = Geometry.rect(split.feed.x, nearby.y - viewport.inset, split.feed.width, nearby.height + viewport.inset);
+    let cards = Feed.cards(area, List.drop(postsFor(state.feeds, view), viewport.start), viewport.start,
+      FeedLayout(split.feed.width, size, state.imageScale), true);
+    Ui.preloadWithin(size, nearby, cards)
+  }
+};
+let warmWindows = (projected: RenderModel, state: UiState, size: Geometry.Size, windows) => {
+  -- First warm displayed/adjacent frames, then the larger nearby resource
+  -- viewport. Feed image elements retain the paint clip; preloadWithin uses
+  -- the resource clip so offscreen images actually reach the encoder.
+  let _ = List.foldLeft(windows, []: List<Reach.Surface<FeedView>>, (seen, surface) => {
+    let visible = surface.viewport.visible;
+    if (visible.width <= 0 || visible.height <= 0 || List.find(seen, (prior) => {
+      sameView(prior.key, surface.key) && prior.viewport.visible == visible
+    }) != None) { seen } else {
+      warmRegion(state, size, surface.key, visible, visible.y);
+      [surface, ..seen]
+    }
+  });
+  let _ = List.foldLeft(windows, []: List<Geometry.Rect>, (seen, surface) => {
+    let nearby = surface.viewport.nearby;
+    if (surface.distance != 0 || List.find(seen, (bounds) => { bounds == nearby }) != None) { seen } else {
+      warmRegion(state, size, surface.key, nearby, projected.scrollOffset);
+      [nearby, ..seen]
+    }
+  });
+  void
+};
+let warmFrames = (previous, state, size) => {
+  let projected = Render.project(previous, state, size);
+  warmWindows(projected, state, size, surfacesFrom(projected, state, size))
+};
+-- Animation frames interpolate between the current and destination windows
+-- already covered by the last plan. Resource completions advance the resource version
+-- and immediately re-plan, even during animation; only unchanged ticks skip it.
+let needsPreparation = (previous, state: UiState, size: Geometry.Size) => {
+  match(previous) {
+    None => { true },
+    Some(graph) => {
+      let old = graph.model;
+      let split = panes(contentBody(size), size);
+      let distance = old.scrollTarget - old.scrollOffset;
+      -- Long jumps can traverse a gap between the prepared current and landing
+      -- windows. Keep warming that path until it is inside the landing margin.
+      let crossingGap = state.scrolling &&
+        (distance > split.feed.height * 2 || distance < 0 - split.feed.height * 2);
+      crossingGap || !Render.sameSize(size, old.size) ||
+        !sameView(state.view, old.state.view) ||
+        !Render.sameScale(state.imageScale, old.state.imageScale) ||
+        state.selected != old.state.selected ||
+        state.scrollRows != old.state.scrollRows ||
+        state.scrollVersion != old.state.scrollVersion ||
+        state.feeds.preloadVersion != old.state.feeds.preloadVersion
+    },
+  }
+};
+let prepare = (state: UiState, size: Geometry.Size, previous) => {
+  if (!needsPreparation(previous, state, size)) { Command.Continue(state) } else {
+    let projected = Render.project(previous, state, size);
+    let windows = surfacesFrom(projected, state, size);
+    let media = planWindows(state, size, windows, Data.postMediaTask, Tabs.requestPageFor);
+    warmWindows(projected, media.state, size, windows);
+    match(media.tasks) {
+      [] => { Command.Continue(media.state) },
+      _ => { Command.SpawnMany(media.state, media.tasks) },
+    }
+  }
+};

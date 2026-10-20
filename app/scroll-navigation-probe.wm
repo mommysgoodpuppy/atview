@@ -1,0 +1,94 @@
+-- The same retained viewport/easing rules drive both axes, including reversal.
+from "./model.wm" import *;
+from "./render.wm" import * as Render;
+from "./update.wm" import { switchTabState, beginScroll, scrollFrameState };
+from "../tui/scroll.wm" import * as Scroll;
+from "../tui/tabs.wm" import * as Tabs;
+from "../tui/command.wm" import * as Command;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/ansi.wm" import * as Ansi;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/surface.wm" import * as Surface;
+from "../tui/resource.wm" import * as Resource;
+from "../proto/api.wm" import { FeedPost };
+
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let animated = (state: UiState) => {
+  match(beginScroll(Command.Continue(state))) {
+    Command.SpawnMany(next, _) => { next },
+    _ => { Panic("expected animation clock") },
+  }
+};
+let includes = (value: String, text: String) => { value :> .includes(text) :> Result.withDefault(false) };
+let main = () => {
+  let vertical = Scroll.Strip([6, 5, 9], 10, 1);
+  expect(Scroll.reveal(vertical, 1, 0) == 0, "visible timeline selection must not move viewport");
+  expect(Scroll.reveal(vertical, 2, 0) == 8, "timeline must reveal only obscured bottom edge");
+  expect(Scroll.reveal(vertical, 1, 8) == 5, "backward timeline navigation must reveal only obscured top edge");
+  let horizontal = Scroll.Strip([6, 5, 9], 10, 0);
+  expect(Scroll.reveal(horizontal, 1, 1) == 1, "visible previous tab must retain viewport offset");
+  expect(Scroll.reveal(horizontal, 2, 1) == 10, "horizontal right edge must use the same reveal rule");
+  expect(Scroll.reveal(horizontal, 0, 10) == 0, "horizontal left edge must use the same reveal rule");
+  expect(Scroll.limit(horizontal, 999) == 10, "scrolling must not leave empty space beyond content end");
+  let motion = Scroll.Motion(80, 10);
+  let reversed = Scroll.frame(motion, true, true);
+  expect(reversed.position < 80 && reversed.position > 10, "reversal must ease from the current position");
+  expect(Scroll.frame(reversed, true, false) == reversed, "background events must not advance the animation clock");
+  let times = Scroll.frameTimes;
+  expect(List.at(times, 0) == Some(16) && List.at(times, 15) == Some(256), "both axes must share a regular short clock");
+  let extra = [
+    .{ ..emptyTab(GeneratorFeed("a"), "Long feed alpha"), loaded = true },
+    .{ ..emptyTab(GeneratorFeed("b"), "Long feed bravo"), loaded = true },
+    .{ ..emptyTab(GeneratorFeed("c"), "Long feed charlie"), loaded = true },
+    .{ ..emptyTab(GeneratorFeed("d"), "Long feed delta"), loaded = true },
+    .{ ..emptyTab(GeneratorFeed("e"), "Long feed echo"), loaded = true },
+    .{ ..emptyTab(GeneratorFeed("f"), "Long feed foxtrot"), loaded = true },
+  ];
+  let feeds = makeUiFeeds("test", "did:test", "", [], [], None, None);
+  let state = UiState(0, GeneratorFeed("f"), Image.Fit, .{ ..feeds, tabs = List.append(feeds.tabs, extra) }, false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+  let size = Geometry.Size(48, 30, 8, 16);
+  let first = Render.render(None, state, size);
+  let original = first.memory.model.tabScroll.position;
+  expect(original > 0, "fixture must initially be horizontally scrolled");
+  let previousState = animated(switchTabState(state, GeneratorFeed("e")));
+  let previous = Render.render(Some(first.memory), previousState, size);
+  expect(previous.memory.model.tabScroll.target == original, "backward selection inside viewport must not jump the bar");
+  expect(!previous.memory.model.state.scrolling, "tab-only animation must not hide timeline media");
+  let crossingState = animated(switchTabState(previousState, GeneratorFeed("d")));
+  let crossing = Render.render(Some(previous.memory), crossingState, size);
+  let position = crossing.memory.model.tabScroll.position;
+  let target = crossing.memory.model.tabScroll.target;
+  expect(target < original && position < original && position > target, "crossing left edge must animate by columns instead of snapping a whole tab");
+  let tickState = scrollFrameState(crossingState, crossingState.scrollVersion, 1, true);
+  let tick = Render.render(Some(crossing.memory), tickState, size);
+  expect(tick.memory.model.tabScroll.position < position, "tab strip must continue easing on clock ticks");
+  expect(!includes(tick.output, Ansi.clear) && !includes(tick.output, "a=d"), "header-only ticks must retain feed surfaces and images");
+  let background = Render.render(Some(tick.memory), .{ ..tickState, status = "background" }, size);
+  expect(background.memory.model.tabScroll.position == tick.memory.model.tabScroll.position, "background completion must not accelerate horizontal scrolling");
+  let reverseState = animated(switchTabState(tickState, GeneratorFeed("f")));
+  let reverse = Render.render(Some(tick.memory), reverseState, size);
+  expect(reverse.memory.model.tabScroll.position > tick.memory.model.tabScroll.position && reverse.memory.model.tabScroll.position < original, "rapid direction reversal must continue from the visible offset");
+  let stoppedState = scrollFrameState(reverseState, reverseState.scrollVersion, 16, false);
+  let stopped = Render.render(Some(reverse.memory), stoppedState, size);
+  expect(stopped.memory.model.tabScroll.position == stopped.memory.model.tabScroll.target, "clock completion must reach horizontal target");
+  let wrappedState = animated(switchTabState(stoppedState, Timeline));
+  let wrapped = Render.render(Some(stopped.memory), wrappedState, size);
+  expect(wrapped.memory.model.tabScroll.target == 0 && wrapped.memory.model.tabScroll.position > 0, "wrapping must also ease through the shared motion system");
+  let resized = Render.render(Some(wrapped.memory), wrappedState, Geometry.Size(30, 30, 8, 16));
+  let strip = Tabs.track(30, state.feeds.tabs :> List.map((tab) => { tab.title }));
+  expect(resized.memory.model.tabScroll.position == Scroll.limit(strip, resized.memory.model.tabScroll.position), "resize must clamp retained horizontal position");
+  let post = (uri) => {
+    UiPost(FeedPost(uri, "body", "today", "test.example", "Test", None, None, None, None, None, "test-cid", None), Resource.Ready(None), Resource.Ready(None))
+  };
+  let verticalState = .{ ..state, view = Timeline, selected = 4,
+    feeds = makeUiFeeds("test", "did:test", "", [post("0"), post("1"), post("2"), post("3"), post("4"), post("5")], [], None, None) };
+  let small = Geometry.Size(40, 14, 8, 16);
+  let verticalFirst = Render.render(None, verticalState, small);
+  expect(verticalFirst.memory.model.scrollOffset == 9 && verticalFirst.memory.model.scrollInset == 1, "timeline must support the shared viewport's partial row offset");
+  let verticalBackState = animated(move(6, -1, verticalState));
+  let verticalBack = Render.render(Some(verticalFirst.memory), verticalBackState, small);
+  expect(verticalBack.memory.model.scrollTarget == 9 && verticalBack.memory.model.scrollOffset == 9, "backward visible timeline selection must also retain its viewport");
+  expect(!includes(verticalBack.output, Ansi.clear), "visible backward timeline selection must remain incremental");
+  print("shared scroll navigation probe: ok")
+};

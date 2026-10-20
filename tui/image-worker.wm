@@ -1,0 +1,62 @@
+-- CPU image encoding runs off the terminal/input thread. The wire protocol
+-- contains plain JS fields, never Workman variant tags or Buffer methods.
+from "./geometry.wm" import * as Geometry;
+from "./png.wm" import * as Png;
+from "./png-jsr.wm" import * as PngJsr;
+from "./sixel.wm" import * as Sixel;
+from "./halfblock.wm" import * as HalfBlock;
+from js.module("node:buffer") import { Buffer };
+from js.global import { addEventListener, postMessage };
+from js.global("Reflect") import { get };
+
+record PixelData = { width: Number, height: Number, bytes: Js.Value };
+
+record Request = {
+  token: Number,
+  x: Number,
+  y: Number,
+  width: Number,
+  height: Number,
+  cellWidth: Number,
+  cellHeight: Number,
+  sixel: Bool,
+  fill: Bool,
+  base64: String,
+  pixels: PixelData,
+  target: Sixel.Target,
+};
+
+let encode = (request: Request) => {
+  let pixels = if (request.pixels.width > 0) {
+    Buffer.from(request.pixels.bytes) :> Task.fromResult :> Task.map((bytes) => {
+      Png.Pixels(bytes, request.pixels.width, request.pixels.height)
+    })
+  } else {
+    Buffer.from(request.base64, "base64") :> Task.fromResult :> Task.andThen(PngJsr.decode)
+  };
+  pixels :> Task.map((decoded) => {
+    if (request.sixel) {
+      let (_, cellHeight) = Sixel.cellPixels(Geometry.Size(0, 0, request.cellWidth, request.cellHeight));
+      match(Sixel.buildIndexed(decoded, request.target)) {
+        None => { ("", []: List<String>) },
+        Some(indexed) => {
+          (Sixel.indexedRaster(indexed, request.target.width, request.target.height),
+            Sixel.rowRasters(indexed, request.target.width, request.target.height, cellHeight))
+        },
+      }
+    } else {
+      ("", HalfBlock.rasterRows(request.target, decoded))
+    }
+  }) :> Task.recover((_) => { ("", []: List<String>) }) :> Task.map((prepared) => {
+    let (output, rows) = prepared;
+    postMessage(JSON{ token: request.token, output: output, rows: Js.Array.fromList(rows) }) :> Result.withDefault(void)
+  })
+};
+
+let main = () => {
+  addEventListener("message", (event) => {
+    let request: Result<Request, Js.Error> = get(event, "data") :> Result.andThen(Json.assert);
+    let _ = request :> Task.fromResult :> Task.andThen(encode);
+    void
+  }) :> Result.debug
+};

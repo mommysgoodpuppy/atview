@@ -1,8 +1,6 @@
 from js.global("Deno") import unsafe * as Deno;
 
--- The terminal's detected image protocol. Sixel is detected even
--- though no sixel encoder exists yet; it maps to half-block
--- rendering until one is added.
+-- The terminal's detected image protocol.
 type Backend =
   | KittyGraphics
   | Sixel
@@ -13,6 +11,7 @@ type Backend =
 -- creates dead arms in rendering code.
 type Renderer =
   | KittyRenderer
+  | SixelRenderer
   | HalfBlockRenderer;
 
 let envString = (name) => {
@@ -55,8 +54,8 @@ let supportsKittyGraphics = () => {
 
 -- Terminals known to support sixel graphics. Static env-var
 -- detection is imperfect — a sixel terminal not listed here
--- falls back to half-block. False positives are safe because
--- Sixel currently renders as half-block.
+-- falls back to half-block, and a false positive prints raw sixel
+-- bytes. Set ATVIEW_IMAGE_BACKEND to override the guess.
 let supportsSixel = () => {
   let term = envString("TERM");
   let termProgram = envString("TERM_PROGRAM");
@@ -97,9 +96,8 @@ let backendName = match(backend) => {
 let backend = detectBackend();
 
 -- Maps the detected protocol to what we can actually render with.
--- Sixel falls back to half-block until a sixel encoder is added.
 let renderer = match(backend) {
   KittyGraphics => { KittyRenderer },
-  Sixel => { HalfBlockRenderer },
+  Sixel => { SixelRenderer },
   HalfBlock => { HalfBlockRenderer },
 };

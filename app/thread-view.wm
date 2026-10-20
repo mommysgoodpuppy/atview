@@ -4,8 +4,7 @@ from "./feed-view.wm" import {
   imageRows,
   indentation,
   metrics,
-  postRows,
-  wrapLines,
+  postLines,
 };
 from "./model.wm" import *;
 from "../proto/api.wm" import { FeedPost };
@@ -15,6 +14,7 @@ from "../tui/draw.wm" import * as Draw;
 from "../tui/element.wm" import * as Ui;
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
+from "../tui/image-host.wm" import * as ImageHost;
 from "../tui/image.wm" import * as Image;
 
 record ReplyElements = {
@@ -74,7 +74,7 @@ let layoutReply = (area, size, cursor, avatar) => {
 let replyPost = (area, cursor, layout: ReplyLayout, post, avatar) => {
   let name = post.author.displayName
     :> Option.withDefault(post.author.handle);
-  let excerpt = postRows(
+  let lines = postLines(
     post.text,
     Geometry.nonNegative(layout.textWidth - 2),
   );
@@ -92,6 +92,7 @@ let replyPost = (area, cursor, layout: ReplyLayout, post, avatar) => {
         image,
       )
     }),
+    Ui.fill(Geometry.rect(layout.textX, area.y + cursor.row, layout.textWidth, 1), " ", Draw.plain),
     Ui.text(
       Geometry.rect(
         layout.textX,
@@ -99,21 +100,18 @@ let replyPost = (area, cursor, layout: ReplyLayout, post, avatar) => {
         layout.textWidth,
         1,
       ),
-      "↳ " ++ name ++ "  @" ++ post.author.handle,
+      "↳ " ++ heart(post.viewerLike) ++ name ++ "  @" ++ post.author.handle,
       Draw.accent,
     ),
-    Ui.showIf(
-      cursor.row + 1 < area.height,
-      Ui.text(
-        Geometry.rect(
-          layout.textX,
-          area.y + cursor.row + 1,
-          layout.textWidth,
-          1,
-        ),
-        "  " ++ excerpt.first,
-        Draw.plain,
+    Ui.lines(
+      Geometry.rect(
+        layout.textX + 2,
+        area.y + cursor.row + 1,
+        Geometry.nonNegative(layout.textWidth - 2),
+        Geometry.nonNegative(area.height - cursor.row - 1),
       ),
+      lines,
+      Draw.plain,
     ),
   ])
 };
@@ -172,7 +170,10 @@ let rec renderReplies = match(area, size, nodes, cursor) => {
                       Geometry.clamp(
                         cursor.row,
                         area.height,
-                        cursor.row + 2,
+                        cursor.row + 1 + List.length(postLines(
+                          post.text,
+                          Geometry.nonNegative(layout.textWidth - 2),
+                        )),
                       ),
                       cursor.imageId + 1,
                     ),
@@ -274,11 +275,7 @@ let threadPane = (area, state: UiState, size: Geometry.Size) => {
         inner.width - avatarColumns -
           (if (avatarColumns > 0) { 1 } else { 0 }),
       );
-      let lines = wrapLines(
-        item.post.text,
-        contentWidth,
-        Geometry.clamp(1, 6, inner.height - 5),
-      );
+      let lines = postLines(item.post.text, contentWidth);
       let textRows = List.length(lines);
       let mediaRow = 1 + textRows;
       let availableImageRows = Geometry.clamp(
@@ -297,7 +294,7 @@ let threadPane = (area, state: UiState, size: Geometry.Size) => {
       let repliesRow = metricsRow + 2;
       Ui.fragment([
         frame,
-        Ui.optional(mediaValue(item.avatar), (image) => {
+        Ui.optional(if (state.scrolling) { None } else { mediaValue(item.avatar) }, (image) => {
           Ui.image(
             2000,
             Geometry.rect(
@@ -320,12 +317,12 @@ let threadPane = (area, state: UiState, size: Geometry.Size) => {
             contentX,
             inner.y + 1,
             contentWidth,
-            textRows,
+            Geometry.nonNegative(Geometry.clamp(0, textRows, inner.height - 1)),
           ),
           lines,
           Draw.plain,
         ),
-        Ui.optional(mediaValue(item.image), (image) => {
+        Ui.optional(if (state.scrolling) { None } else { mediaValue(item.image) }, (image) => {
           Ui.showIf(
             mediaRows > 0,
             Ui.image(
@@ -341,35 +338,33 @@ let threadPane = (area, state: UiState, size: Geometry.Size) => {
             ),
           )
         }),
-        Ui.text(
-          Geometry.rect(
-            contentX,
-            inner.y + metricsRow,
-            contentWidth,
-            1,
-          ),
-          metrics(item.post) ++ "   " ++ item.post.createdAt,
-          Draw.muted,
+        Ui.showIf(
+          metricsRow < inner.height,
+          Ui.fragment([
+            Ui.fill(Geometry.rect(contentX, inner.y + metricsRow, contentWidth, 1), " ", Draw.plain),
+            Ui.text(Geometry.rect(contentX, inner.y + metricsRow, contentWidth, 1), metrics(item.post) ++ "   " ++ item.post.createdAt, Draw.muted),
+          ]),
         ),
-        Ui.text(
-          Geometry.rect(
-            inner.x,
-            inner.y + repliesRow - 1,
-            inner.width,
-            1,
+        Ui.showIf(
+          repliesRow - 1 < inner.height,
+          Ui.text(
+            Geometry.rect(inner.x, inner.y + repliesRow - 1, inner.width, 1),
+            "replies",
+            Draw.accent,
           ),
-          "replies",
-          Draw.accent,
         ),
-        renderThreadStatus(
-          Geometry.rect(
-            inner.x,
-            inner.y + repliesRow,
-            inner.width,
-            Geometry.nonNegative(inner.height - repliesRow),
+        Ui.showIf(
+          repliesRow < inner.height,
+          renderThreadStatus(
+            Geometry.rect(
+              inner.x,
+              inner.y + repliesRow,
+              inner.width,
+              Geometry.nonNegative(inner.height - repliesRow),
+            ),
+            state.thread,
+            size,
           ),
-          state.thread,
-          size,
         ),
       ])
     },
@@ -383,7 +378,11 @@ let rec deleteThreadImages = (identifier, remaining) => {
   if (remaining <= 0) {
     ""
   } else {
-    Kitty.deleteImage(identifier) ++
+    ImageHost.deleteImage(identifier) ++
       deleteThreadImages(identifier + 1, remaining - 1)
   }
+};
+
+let renderThreadReactions = (area, state: UiState, size: Geometry.Size) => {
+  Ui.render(size, Ui.withoutImages(threadPane(area, state, size)))
 };

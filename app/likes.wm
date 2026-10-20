@@ -1,0 +1,32 @@
+-- Only the explicit uppercase L action starts a repository write.
+from "./model.wm" import *;
+from "./reaction-model.wm" import * as Reaction;
+from "../proto/likes.wm" import * as Likes;
+from "../proto/xrpc.wm" import { AppError, describeError };
+from "../tui/command.wm" import * as Command;
+
+let toggleWith = (state: UiState, create, remove) => {
+  match(List.at(postsForState(state), state.selected)) {
+    None => { Command.Continue(state) },
+    Some(item) => {
+      let before = Reaction.reactionFor(state.feeds, item.post);
+      if (before.pending) { Command.Continue(state) } else {
+        let pending = Reaction.remember(.{ ..state, status = "",
+          feeds = modifyTab(state.feeds, state.view, (tab) => { .{ ..tab, status = "" } }) },
+          .{ ..before, pending = true });
+        let request = match(before.viewerLike) {
+          None => { create(state.feeds.accessJwt, state.feeds.did, item.post.uri, item.post.cid) :> Task.map(Some) },
+          Some(uri) => { remove(state.feeds.accessJwt, state.feeds.did, uri) :> Task.map((_) => { None }) },
+        };
+        let task = request :> Task.map((liked) => {
+          (current: UiState) => { Reaction.completed(current, before, liked) }
+        }) :> Task.recover((error) => {
+          let message = describeError(error);
+          (current: UiState) => { Reaction.failed(current, before, state.view, message) }
+        });
+        Command.Spawn(pending, task)
+      }
+    },
+  }
+};
+let toggle = (state: UiState) => { toggleWith(state, Likes.create, Likes.remove) };

@@ -1,0 +1,44 @@
+-- Offline CPU timing of a retained selection change with decoded media.
+from "../app/model.wm" import *;
+from "../app/render.wm" import * as Render;
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/image-host.wm" import * as Host;
+from "../tui/png.wm" import * as Png;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/resource.wm" import * as Resource;
+from "../tui/surface.wm" import * as Surface;
+from "./clock.wm" import * as Clock;
+from js.module("node:buffer") import { Buffer };
+
+let main = () => {
+  let bytes = Buffer.alloc(256 * 256 * 4, 255) :> Result.debug;
+  let image = Image.Image("", "test", 256, 256, Some(Png.Pixels(bytes, 256, 256)));
+  let post = (uri) => {
+    UiPost(
+      FeedPost(uri, "body", "today", "test.example", "Test", None, None, None, Some(Views.PostImage("", "", "test", None)), None, "test-cid", None),
+      Resource.Ready(Some(image)), Resource.Ready(None),
+    )
+  };
+  let feeds = makeUiFeeds("test", "did:test", "", [post("1"), post("2"), post("3")], [], None, None);
+  let initial = UiState(0, Timeline, Image.Fit, feeds, false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+  let size = Geometry.Size(160, 50, 8, 16);
+  let started = Clock.now();
+  let first = Render.render(None, initial, size);
+  print("initial frame ms: " ++ Text.of(Clock.now() - started));
+  let selected = Clock.now();
+  let next = Render.render(Some(first.memory), move(3, 1, initial), size);
+  print("selection frame ms: " ++ Text.of(Clock.now() - selected));
+  print("selection output bytes: " ++ Text.of(next.output :> .length :> Result.withDefault(0)));
+  Host.start((_) => { void });
+  let asyncStarted = Clock.now();
+  let asyncFirst = Render.render(None, initial, size);
+  print("worker initial staging ms: " ++ Text.of(Clock.now() - asyncStarted));
+  let asyncSelected = Clock.now();
+  let asyncNext = Render.render(Some(asyncFirst.memory), move(3, 1, initial), size);
+  print("worker selection staging ms: " ++ Text.of(Clock.now() - asyncSelected));
+  print("worker selection output bytes: " ++ Text.of(asyncNext.output :> .length :> Result.withDefault(0)));
+  Host.stop()
+};

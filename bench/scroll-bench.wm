@@ -1,0 +1,82 @@
+-- Offline synchronous frame costs, including resource planning and warming.
+from "../app/model.wm" import *;
+from "../app/preload.wm" import * as Preload;
+from "../app/render.wm" import * as Render;
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/image-host.wm" import * as Host;
+from "../tui/resource.wm" import * as Resource;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/surface.wm" import * as Surface;
+from "../tui/scroll.wm" import * as Scroll;
+from "../tui/timer.wm" import * as Timer;
+from "./clock.wm" import * as Clock;
+from js.module("node:buffer") import { Buffer };
+
+let rec waitIdle = (remaining) => {
+  if (Host.isIdle()) { Task.succeed(void) } else {
+    if (remaining <= 0) { Host.stop(); Panic("benchmark worker timed out") } else {
+      Timer.delay(5) :> Task.andThen((_) => { waitIdle(remaining - 1) })
+    }
+  }
+};
+let main = () => {
+  let padding = Buffer.alloc(128 * 1024, 65) :> Result.debug :> .toString("ascii") :> Result.debug;
+  let png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGP4z8DAAMIM/////w8AH+4F+7C4l8kAAAAASUVORK5CYII=";
+  let rec posts = (tab, index) => {
+    if (index >= 60) { [] } else {
+      let uri = Text.of(tab) ++ ":" ++ Text.of(index);
+      let image = Image.Image(png ++ padding ++ uri, "", 256, 256, None);
+      let post = FeedPost(uri, "Some text with enough words to wrap over several lines in the narrow feed pane.", "today", "test", "Test", None, None, None, Some(Views.PostImage("", "", "", Some(Views.AspectRatio(1, 1)))), None, "cid", None);
+      [UiPost(post, Resource.Ready(Some(image)), Resource.Ready(None)), ..posts(tab, index + 1)]
+    }
+  };
+  let feeds = makeUiFeeds("test", "did:test", "", posts(0, 0), posts(1, 0), None, None);
+  let rec tabs = (index) => {
+    if (index >= 8) { [] } else { [FeedTab(GeneratorFeed(Text.of(index)), "Feed", posts(index, 0), None, true, false, "", 0, 0), ..tabs(index + 1)] }
+  };
+  let initial = UiState(0, Timeline, Image.Fit, .{ ..feeds, tabs = List.append(feeds.tabs, tabs(2)) }, false, "", 0, ThreadLoading(""), [], true, 1, 0, 0);
+  let size = Geometry.Size(160, 50, 8, 16);
+  Host.start((_) => { void });
+  let first = Render.render(None, initial, size);
+  let rec frames = (index, state, memory, prepSum, prepMax, paintSum, paintMax) => {
+    if (index >= 60) {
+      print("prepare avg/max ms: " ++ Text.of(prepSum / index) ++ "/" ++ Text.of(prepMax));
+      print("render avg/max ms: " ++ Text.of(paintSum / index) ++ "/" ++ Text.of(paintMax))
+    } else {
+      let next = .{ ..state, scrollFrame = index + 1, scrollRows = state.scrollRows + 2 };
+      let started = Clock.now();
+      let _ = Preload.prepare(next, size, Some(memory));
+      let prepared = Clock.now();
+      let frame = Render.render(Some(memory), next, size);
+      let finished = Clock.now();
+      let prep = prepared - started;
+      let paint = finished - prepared;
+      frames(index + 1, next, frame.memory, prepSum + prep, if (prep > prepMax) { prep } else { prepMax }, paintSum + paint, if (paint > paintMax) { paint } else { paintMax })
+    }
+  };
+  frames(0, initial, first.memory, 0, 0, 0, 0);
+  let destination = .{ ..initial, scrollRows = 120, scrollFrame = 0 };
+  let animated = Render.render(Some(first.memory), destination, size);
+  let rec ticks = (index, memory, total, maximum) => {
+    if (index >= 60) {
+      print("animation prepare avg/max ms: " ++ Text.of(total / index) ++ "/" ++ Text.of(maximum))
+    } else {
+      let next = .{ ..destination, scrollFrame = index + 1 };
+      let started = Clock.now();
+      let _ = Preload.prepare(next, size, Some(memory));
+      let elapsed = Clock.now() - started;
+      let frame = Render.render(Some(memory), next, size);
+      ticks(index + 1, frame.memory, total + elapsed, if (elapsed > maximum) { elapsed } else { maximum })
+    }
+  };
+  ticks(0, animated.memory, 0, 0);
+  waitIdle(4000) :> Task.map((_) => {
+    print("with prepared image output:");
+    frames(0, initial, first.memory, 0, 0, 0, 0);
+    ticks(0, animated.memory, 0, 0);
+    Host.stop()
+  })
+};

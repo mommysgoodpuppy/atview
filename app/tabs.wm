@@ -1,0 +1,81 @@
+-- Discover pinned tabs after first paint; pages load on activation or semantic reachability.
+from "./model.wm" import *;
+from "./data.wm" import * as Data;
+from "./reaction-model.wm" import * as Reaction;
+from "../proto/api.wm" import * as Api;
+from "../proto/api.wm" import { FeedPage };
+from "../proto/feed-tabs.wm" import * as SavedFeeds;
+from "../proto/xrpc.wm" import { AppError, describeError };
+
+let addTabs = (state: UiState, saved) => {
+  let extra = saved :> List.map((feed: SavedFeeds.SavedFeed) => {
+    let view = if (feed.kind == "list") { ListTimeline(feed.uri) } else { GeneratorFeed(feed.uri) };
+    emptyTab(view, feed.title)
+  }) :> List.filter((tab) => { tabFor(state.feeds, tab.view) == None });
+  .{ ..state, feeds = .{ ..state.feeds, preloadVersion = state.feeds.preloadVersion + 1, tabs = List.append(state.feeds.tabs, extra) },
+    renderVersion = state.renderVersion + 1 }
+};
+let discover = (state: UiState) => {
+  SavedFeeds.pinnedFeeds(state.feeds.accessJwt) :> Task.map((saved) => {
+    (current: UiState) => { addTabs(current, saved) }
+  }) :> Task.recover((error) => {
+    let message = "feed tabs unavailable: " ++ describeError(error);
+    (current: UiState) => { .{ ..current, status = message } }
+  })
+};
+
+let loadedState = (state: UiState, requestedView, page: FeedPage, posts) => {
+  let feeds = modifyTab(state.feeds, requestedView, (tab) => {
+    .{ ..tab, posts = List.append(tab.posts, Reaction.applyPosts(state.feeds.reactions, posts :> List.map((post) => { Data.sharedPost(state, post) }))), cursor = page.cursor,
+      loaded = true, loading = false, status = if (List.length(posts) > 0) { "" } else { "end of feed" } }
+  });
+  let active = sameView(state.view, requestedView);
+  let tab = tabValue(feeds, state.view);
+  .{ ..state, feeds = feeds, loading = tab.loading, status = tab.status,
+    renderVersion = state.renderVersion + (if (active) { 1 } else { 0 }) }
+};
+let failedPage = (state: UiState, requestedView, message) => {
+  let feeds = modifyTab(state.feeds, requestedView, (tab) => {
+    .{ ..tab, loading = false, status = message }
+  });
+  let tab = tabValue(feeds, state.view);
+  .{ ..state, feeds = feeds, loading = tab.loading, status = tab.status }
+};
+let requestPageFor = (state: UiState, view) => {
+  let tab = tabValue(state.feeds, view);
+  match(view) {
+    Timeline => {
+      Api.timelinePage(state.feeds.accessJwt, 30, tab.cursor) :> Task.map((page) => {
+        FeedPage(page.posts :> List.map(Api.feedPost), page.cursor)
+      })
+    },
+    OwnPosts => {
+      Api.authorFeedPageAuthenticated(state.feeds.accessJwt, state.feeds.handle, 30, tab.cursor) :> Task.map((page) => {
+        FeedPage(page.posts :> List.map(Api.feedPost), page.cursor)
+      })
+    },
+    GeneratorFeed(uri) => { SavedFeeds.page(state.feeds.accessJwt, "feed", uri, 30, tab.cursor) },
+    ListTimeline(uri) => { SavedFeeds.page(state.feeds.accessJwt, "list", uri, 30, tab.cursor) },
+  }
+};
+
+let firstPagePlanWith = (state: UiState, views, request) => {
+  let rec plan = match(remaining, current) => {
+    ([], _) => { current },
+    ([view, ..tail], _) => {
+      let tab = tabValue(current.state.feeds, view);
+      if (tab.loaded || tab.loading || tab.status != "") { plan(tail, current) } else {
+        let task = request(current.state, view) :> Task.map((page: FeedPage) => {
+          (latest: UiState) => { loadedState(latest, view, page, Data.pendingPosts(page.posts)) }
+        }) :> Task.recover((error) => {
+          (latest: UiState) => { failedPage(latest, view, describeError(error)) }
+        });
+        let next = .{ ..current.state, feeds = modifyTab(current.state.feeds, view, (entry) => { .{ ..entry, loading = true } }) };
+        plan(tail, PrefetchPlan(next, List.append(current.tasks, [task])))
+      }
+    },
+  };
+  plan(views, PrefetchPlan(state, []))
+};
+
+let firstPagePlan = (state, views) => { firstPagePlanWith(state, views, requestPageFor) };

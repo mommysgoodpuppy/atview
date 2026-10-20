@@ -9,6 +9,19 @@ from "../tui/ansi.wm" import * as Ansi;
 from "../tui/draw.wm" import * as Draw;
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
+from "../tui/image-host.wm" import * as ImageHost;
+from "../tui/tabs.wm" import * as TabBar;
+from "../tui/terminal-cap.wm" import * as Cap;
+from "../tui/scroll.wm" import * as Scroll;
+
+let renderTabsAt = (state: UiState, size: Geometry.Size, offset) => {
+  TabBar.renderAt(Geometry.rect(0, 0, size.width, 1),
+    state.feeds.tabs :> List.map((tab) => { tab.title }), activeTabIndex(state), offset)
+};
+let renderTabs = (state: UiState, size: Geometry.Size) => {
+  TabBar.render(Geometry.rect(0, 0, size.width, 1),
+    state.feeds.tabs :> List.map((tab) => { tab.title }), activeTabIndex(state))
+};
 
 let renderFooter = (state: UiState, size: Geometry.Size) => {
   let feeds = state.feeds;
@@ -17,7 +30,7 @@ let renderFooter = (state: UiState, size: Geometry.Size) => {
   let activity = if (state.loading) {
     "   loading…"
   } else {
-    if (state.status == "") { "" } else { "   " ++ state.status }
+    if (footerStatus(state) == "") { "" } else { "   " ++ footerStatus(state) }
   };
   let graph = graphCounts(state.threadGraph);
   let background = if (graph.pending > 0) {
@@ -27,15 +40,15 @@ let renderFooter = (state: UiState, size: Geometry.Size) => {
     ""
   };
   let help = if (phoneAspect(Geometry.screen(size), size)) {
-    "   j/k move   t/m feed   f scale   q quit "
+    "   j/k move   u/i tabs   L ♥   r retry   q quit "
   } else {
-    "   t timeline   m my posts   f fit/fill   ↑/↓ j/k move   q quit "
+    "   u/i tabs   L like   t following   m my posts   f fit/fill   r retry   j/k move   q quit "
   };
   Draw.fill(footer, " ", Draw.status) ++
     Draw.text(
       footer,
       " " ++ titleFor(feeds, state.view) ++ "   " ++
-        Text.of(state.selected + 1) ++ "/" ++ Text.of(List.length(posts)) ++
+        Text.of(if (List.length(posts) == 0) { 0 } else { state.selected + 1 }) ++ "/" ++ Text.of(List.length(posts)) ++
         activity ++ background ++ help,
       Draw.status,
     )
@@ -74,7 +87,7 @@ let rec renderBorderAt = match(area, posts, request) => {
               Draw.timelineBox(
                 borderArea,
                 request.active,
-                area.y > 0,
+                area.y > 1,
                 joinedBottom,
               )
             }
@@ -105,14 +118,15 @@ let rec renderBorderAt = match(area, posts, request) => {
   },
 };
 
-let renderViewport = (
+let renderViewportAt = (
   state: UiState,
   size: Geometry.Size,
   start,
   inset,
+  tabOffset,
 ) => {
   let posts = postsForState(state);
-  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let body = contentBody(size);
   let split = panes(body, size);
   let feedArea = Geometry.rect(
     split.feed.x,
@@ -123,43 +137,41 @@ let renderViewport = (
   let visible = List.drop(posts, start);
   let cursor = CardCursor(state.selected, start);
   let layout = FeedLayout(split.feed.width, size, state.imageScale);
-  Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ Kitty.deleteAll ++
-    renderCards(feedArea, visible, start, layout) ++
+  Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ ImageHost.deleteAll() ++
+    renderCardsVisible(feedArea, visible, start, layout, !state.scrolling || Cap.renderer == Cap.SixelRenderer) ++
     renderBorderAt(
       feedArea,
       visible,
       BorderRender(cursor, layout, state.selected, true, true),
     ) ++
     (if (split.thread.width > 0) { renderThreadPane(split.thread, state, size) } else { "" }) ++
-    renderFooter(state, size) ++
+    renderFooter(state, size) ++ renderTabsAt(state, size, tabOffset) ++
     Draw.endFrame ++ Ansi.endSynchronizedUpdate
+};
+
+let renderViewport = (state: UiState, size: Geometry.Size, start, inset) => {
+  let labels = state.feeds.tabs :> List.map((tab) => { tab.title });
+  let strip = TabBar.track(size.width, labels);
+  renderViewportAt(state, size, start, inset, Scroll.reveal(strip, activeTabIndex(state), 0))
 };
 
 let renderFull = (state: UiState, size: Geometry.Size) => {
   let posts = postsForState(state);
-  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let body = contentBody(size);
   let split = panes(body, size);
-  let start = visibleStart(
-    posts,
-    state.selected,
-    0,
-    WindowLayout(
-      split.feed.width,
-      split.feed.height,
-      size,
-      state.imageScale,
-    ),
-  );
-  renderViewport(state, size, start, 0)
+  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  let strip = Scroll.Strip(cardHeights(posts, layout), split.feed.height, 1);
+  let viewport = Scroll.locateAxis(strip, Scroll.reveal(strip, state.selected, 0));
+  renderViewport(state, size, viewport.start, viewport.inset)
 };
 
-let renderFeedMedia = (state: UiState, size: Geometry.Size, start, showImages) => {
+let renderFeedMedia = (state: UiState, size: Geometry.Size, start, inset, showImages) => {
   let posts = postsFor(state.feeds, state.view);
-  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let body = contentBody(size);
   let split = panes(body, size);
   let visible = List.drop(posts, start);
   renderMediaCards(
-    split.feed,
+    Geometry.rect(split.feed.x, split.feed.y - inset, split.feed.width, split.feed.height + inset),
     visible,
     start,
     FeedLayout(split.feed.width, size, state.imageScale),
@@ -171,32 +183,40 @@ let renderSelectionOutline = (
   state: UiState,
   size: Geometry.Size,
   start,
+  inset,
   target,
   active,
   standalone,
 ) => {
   let posts = postsForState(state);
-  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let body = contentBody(size);
   let split = panes(body, size);
   let visible = List.drop(posts, start);
   let cursor = CardCursor(state.selected, start);
   let layout = FeedLayout(split.feed.width, size, state.imageScale);
   renderBorderAt(
-    split.feed,
+    Geometry.rect(split.feed.x, split.feed.y - inset, split.feed.width, split.feed.height + inset),
     visible,
     BorderRender(cursor, layout, target, active, standalone),
   )
 };
 
 let renderThreadRegion = (state: UiState, size: Geometry.Size) => {
-  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let body = contentBody(size);
   let split = panes(body, size);
   if (split.thread.width <= 0) {
     ""
   } else {
-    Kitty.deleteImage(1) ++
+    ImageHost.deleteImage(1) ++
       deleteThreadImages(2000, size.height + 1) ++
       Draw.fill(split.thread, " ", Draw.plain) ++
       renderThreadPane(split.thread, state, size)
   }
+};
+
+let renderReactions = (state: UiState, size: Geometry.Size, start, inset) => {
+  let split = panes(contentBody(size), size);
+  let area = Geometry.rect(split.feed.x, split.feed.y - inset, split.feed.width, split.feed.height + inset);
+  renderMetrics(area, List.drop(postsForState(state), start), FeedLayout(split.feed.width, size, state.imageScale)) ++
+    (if (split.thread.width > 0) { renderThreadReactions(split.thread, state, size) } else { "" })
 };

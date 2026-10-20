@@ -1,0 +1,18 @@
+-- Explicit rectangular scrolling. Only use after verifying terminal support:
+-- sixel support alone does not imply image/margin scrolling support.
+from "./ansi.wm" import * as Ansi;
+from "./geometry.wm" import * as Geometry;
+
+-- Positive rows move existing content upward; negative rows move it downward.
+-- Reset margins immediately so later text/image output uses screen coordinates.
+let rectangle = (area: Geometry.Rect, rows) => {
+  if (rows == 0 || area.width < 2 || area.height < 2) { "" } else {
+    let count = Geometry.clamp(1, area.height, if (rows > 0) { rows } else { 0 - rows });
+    Ansi.csi ++ "?69h" ++
+      Ansi.csi ++ Text.of(area.x + 1) ++ ";" ++ Text.of(area.x + area.width) ++ "s" ++
+      Ansi.csi ++ Text.of(area.y + 1) ++ ";" ++ Text.of(area.y + area.height) ++ "r" ++
+      Ansi.cursorTo(area.y + 1, area.x + 1) ++
+      Ansi.csi ++ Text.of(count) ++ (if (rows > 0) { "S" } else { "T" }) ++
+      Ansi.csi ++ "r" ++ Ansi.csi ++ "s" ++ Ansi.csi ++ "?69l"
+  }
+};

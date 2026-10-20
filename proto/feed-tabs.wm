@@ -1,0 +1,114 @@
+-- Read-only discovery of pinned account feeds and their cursor pages.
+from "./api.wm" import * as Api;
+from "./views.wm" import * as Views;
+from "./json-boundary.wm" import * as Boundary;
+from "./xrpc.wm" import * as Xrpc;
+
+record SavedFeed = { kind: String, uri: String, title: String };
+record PreferencesWire = { preferences: Js.Array<Js.Object> };
+record SavedFeedsWire = { items: Js.Array<Js.Object> };
+record LegacyFeedsWire = { pinned: Js.Array<String> };
+record SavedItemWire = { value: String, pinned: Bool };
+record GeneratorWire = { view: Js.Object };
+record ListWire = { list: Js.Object };
+
+let rec findPreference = match(preferences, typeName) => {
+  ([], _) => { Ok(None) },
+  ([preference, ..tail], _) => {
+    Boundary.optionalString(preference, "$type") :> Result.andThen((kind) => {
+      if (kind == Some(typeName)) { Ok(Some(preference)) } else { findPreference(tail, typeName) }
+    })
+  },
+};
+let fallbackTitle = (uri: String) => {
+  let parts = uri :> .split("/") :> Result.map(Js.Array.toList) :> Result.withDefault([]);
+  List.at(parts, List.length(parts) - 1) :> Option.withDefault(uri)
+};
+let decodeItem = (body) => {
+  let item: Result<SavedItemWire, Js.Error> = body :> Json.assert;
+  Result|item, Boundary.optionalString(body, "type")| :> Result.map((value, kind) => {
+    if (value.pinned && (kind == Some("feed") || kind == Some("list"))) {
+      Some(SavedFeed(kind :> Option.withDefault("feed"), value.value, fallbackTitle(value.value)))
+    } else { None }
+  })
+};
+let rec unique = match(items, seen) => {
+  ([], _) => { [] },
+  ([item, ..tail], _) => {
+    if (List.any(seen, (uri) => { uri == item.uri })) { unique(tail, seen) } else {
+      [item, ..unique(tail, [item.uri, ..seen])]
+    }
+  },
+};
+let decodePreferences = (body) => {
+  let response: Result<PreferencesWire, Js.Error> = body :> Json.assert;
+  response :> Result.andThen((wire) => {
+    let preferences = Js.Array.toList(wire.preferences);
+    findPreference(preferences, "app.bsky.actor.defs#savedFeedsPrefV2") :> Result.andThen((current) => {
+      match(current) {
+        Some(value) => {
+          let saved: Result<SavedFeedsWire, Js.Error> = value :> Json.assert;
+          saved :> Result.andThen((feeds) => {
+            Js.Array.toList(feeds.items) :> List.map(decodeItem) :> Result.collectList :> Result.map((items) => {
+              let pinned = List.mapPartial(items, (item) => { item });
+              unique(pinned, [])
+            })
+          })
+        },
+        None => {
+          findPreference(preferences, "app.bsky.actor.defs#savedFeedsPref") :> Result.andThen((legacy) => {
+            match(legacy) {
+              None => { Ok([]) },
+              Some(value) => {
+                let saved: Result<LegacyFeedsWire, Js.Error> = value :> Json.assert;
+                saved :> Result.map((feeds) => {
+                  unique(Js.Array.toList(feeds.pinned) :> List.map((uri: String) => {
+                    let isList = uri :> .includes("/app.bsky.graph.list/") :> Result.withDefault(false);
+                    SavedFeed(if (isList) { "list" } else { "feed" }, uri, fallbackTitle(uri))
+                  }), [])
+                })
+              },
+            }
+          })
+        },
+      }
+    })
+  })
+};
+let hydrateTitle = (jwt, feed: SavedFeed) => {
+  let request = if (feed.kind == "list") {
+    Api.query("https://bsky.social", Some(jwt), "app.bsky.graph.getList", [Xrpc.QueryParam("list", feed.uri), Xrpc.QueryParam("limit", "1")])
+      :> Task.andThen((body) => {
+        let wire: Result<ListWire, Js.Error> = body :> Json.assert;
+        wire :> Result.andThen((value) => { Boundary.optionalString(value.list, "name") })
+          :> Result.mapErr(Xrpc.ResponseShapeFailure) :> Task.fromResult
+      })
+  } else {
+    Api.query("https://bsky.social", Some(jwt), "app.bsky.feed.getFeedGenerator", [Xrpc.QueryParam("feed", feed.uri)])
+      :> Task.andThen((body) => {
+        let wire: Result<GeneratorWire, Js.Error> = body :> Json.assert;
+        wire :> Result.andThen((value) => { Boundary.optionalString(value.view, "displayName") })
+          :> Result.mapErr(Xrpc.ResponseShapeFailure) :> Task.fromResult
+      })
+  };
+  request :> Task.map((title) => { SavedFeed(feed.kind, feed.uri, title :> Option.withDefault(feed.title)) })
+    :> Task.recover((_) => { feed })
+};
+let pinnedFeeds = (jwt) => {
+  Api.query("https://bsky.social", Some(jwt), "app.bsky.actor.getPreferences", [])
+    :> Task.andThen((body) => {
+      decodePreferences(body) :> Result.mapErr(Xrpc.ResponseShapeFailure) :> Task.fromResult
+    }) :> Task.andThen((feeds) => {
+      feeds :> List.map((feed) => { hydrateTitle(jwt, feed) }) :> Task.collectList
+    })
+};
+let page = (jwt, kind, uri, limit, cursor) => {
+  let (method, parameter) = if (kind == "list") {
+    ("app.bsky.feed.getListFeed", "list")
+  } else { ("app.bsky.feed.getFeed", "feed") };
+  Api.query("https://bsky.social", Some(jwt), method, List.append([
+    Xrpc.QueryParam(parameter, uri), Xrpc.QueryParam("limit", Text.of(limit)),
+  ], Api.cursorParams(cursor))) :> Api.decodeAuthorFeedT :> Task.map((value) => {
+    Api.FeedPage(value.posts :> List.map(Api.feedPost), value.cursor)
+  })
+};

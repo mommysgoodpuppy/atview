@@ -1,183 +1,445 @@
-from "./geometry.wm" import * as Geometry;
-from "./image.wm" import { Image, Scale };
-from "./png.wm" import * as Png;
+-- Hand-written sixel encoder for terminals that speak DEC sixel
+-- (Windows Terminal, foot, mlterm, contour, mintty).
+--
+-- The image is reduced to a fixed 6x6x6 RGB cube (216 colors) so palette
+-- definitions stay small and every pixel maps to one plane index. Each sixel
+-- band covers six image rows; for every palette color present in the band we
+-- emit one plane of width characters (`?` where the color is absent).
+--
+-- Workman has no bit operators, so the per-pixel sixel masks are built with
+-- tui/byte.wm, and `String.fromCharCode` turns a mask into a printable sixel
+-- data character (63 + mask).
+
+from "./ansi.wm" import * as Ansi;
 from "./byte.wm" import * as Byte;
-from js.global("String.prototype.fromCharCode") import unsafe {
-  call as fromCharCode: Number -> Number
+from "./geometry.wm" import * as Geometry;
+from "./image.wm" import { Image, Scale, Fit, Fill };
+from "./png.wm" import * as Png;
+from js.global("Math") import unsafe {
+  floor: Number -> Number,
+};
+from js.module("node:buffer") import { Buffer };
+from js.module("node:buffer") import type { Buffer as ByteBuffer };
+from js.global("String") import unsafe {
+  fromCharCode: Number -> String,
 };
 
-record Rgba = { 
-  r: Number,
-  g: Number,
-  b: Number,
-  a: Number
+-- Sixel raster coordinates are device pixels, so the target raster must match
+-- the area's physical size: area.width * cellWidth by area.height * cellHeight.
+-- Terminals answer CSI 16 t with their cell size; before that (or when they do
+-- not answer) the runtime carries the 1:2 ratio (1, 2), which is substituted
+-- with a typical 8x16 pixel cell.
+let cellPixels = (terminal: Geometry.Size) => {
+  if (terminal.cellWidth <= 1 && terminal.cellHeight <= 2) {
+    (8, 16)
+  } else {
+    (
+      Geometry.clamp(1, 64, terminal.cellWidth),
+      Geometry.clamp(1, 64, terminal.cellHeight),
+    )
+  }
 };
 
-record Rgb = { 
-  r: Number,
-  g: Number,
-  b: Number,
-};
+-- A sixel band always covers six raster rows.
+let bandRows = 6;
 
-record ImageRgba = { 
+-- 6 levels per channel, 51 apart, covering 0..255.
+let levelCount = 6;
+let levelStep = 51;
+let levelPercent = 20;
+let paletteSize = 216;
+let transparentIndex = 216;
+
+record Target = {
+  offsetX: Number,
+  offsetY: Number,
   width: Number,
   height: Number,
-  pixels: List<Rgba>
+  sourceX: Number,
+  sourceY: Number,
+  sourceWidth: Number,
+  sourceHeight: Number,
 };
 
-type Pixel = Transparent | Color<Number>;
-
-record IndexedImage = {
-  width:Number,
-  height:Number,
-  pixels: List<Pixel>,
-  palette: List<Rgb>
+let levelOf = (value) => {
+  Geometry.clamp(0, levelCount - 1, floor(value / levelStep))
 };
 
-let quantize = (img) => {
-  
+let colorIndexOf = (red, green, blue) => {
+  levelOf(red) * 36 + levelOf(green) * 6 + levelOf(blue)
 };
 
-let listMap = (list, fn) => {
-  let rec helper = (acc, remaining) => {
-    match (remaining) {
-      [] => {List.reverse(acc)},
-      [head, ..tail] => {helper([fn(head), ..acc], tail)}
-    }
-  };
-  helper([], list)
+-- Palette channels are emitted as sixel percentages (0..100).
+let colorOf = (index) => {
+  let red = floor(index / 36);
+  let green = floor((index - red * 36) / 6);
+  let blue = index - red * 36 - green * 6;
+  (red * levelPercent, green * levelPercent, blue * levelPercent)
 };
 
-let listUnzip = (list) => {
-  let rec loop = (l, l1, l2) => {
-    match (l) {
-      [] => {(List.reverse(l1), List.reverse(l2))},
-      [(Var(x), Var(y)), ..tl] => { loop(tl, [x, ..l1], [y, ..l2])}
-    }
-  };
-  loop(list, [], [])
+let rec repeatChar = (symbol, count) => {
+  if (count <= 0) {
+    ""
+  } else {
+    symbol ++ repeatChar(symbol, count - 1)
+  }
 };
 
-let listTake = (list, amount) => {
-  let rec helper = (acc, count, remain) => {
-    match (remain) {
-      [] => {List.reverse(acc)},
-      [x, ..xs] => {
-        if (count == 0) {List.reverse(acc)}
-        else {helper([x, ..acc], count - 1, xs)}
-      }
-    }
-  };
-  helper([],amount, list)
+-- Fit: scale the whole image into the area, preserving its aspect ratio.
+let fitTarget = (area: Geometry.Rect, terminal: Geometry.Size, pixelWidth, pixelHeight) => {
+  let (cellWidth, cellHeight) = cellPixels(terminal);
+  let availableWidth = area.width * cellWidth;
+  let availableHeight = area.height * cellHeight;
+  let widthScale = availableWidth / pixelWidth;
+  let heightScale = availableHeight / pixelHeight;
+  let scale = if (widthScale < heightScale) { widthScale } else { heightScale };
+  let width = Geometry.clamp(1, availableWidth, floor(pixelWidth * scale));
+  let height = Geometry.clamp(1, availableHeight, floor(pixelHeight * scale));
+  Target(
+    floor((availableWidth - width) / 2 / cellWidth),
+    floor((availableHeight - height) / 2 / cellHeight),
+    width,
+    height,
+    0,
+    0,
+    pixelWidth,
+    pixelHeight,
+  )
 };
 
-let print1pix = (pix) => {
-  print(Png.byte(pix, 0))
+-- Fill: cover the area, cropping the source instead of leaving margins.
+let fillTarget = (area: Geometry.Rect, terminal: Geometry.Size, pixelWidth, pixelHeight) => {
+  let (cellWidth, cellHeight) = cellPixels(terminal);
+  let availableWidth = area.width * cellWidth;
+  let availableHeight = area.height * cellHeight;
+  let targetRatio = availableWidth / availableHeight;
+  let imageRatio = pixelWidth / pixelHeight;
+  if (imageRatio > targetRatio) {
+    let sourceWidth = Geometry.clamp(1, pixelWidth, floor(pixelHeight * targetRatio));
+    Target(
+      0,
+      0,
+      availableWidth,
+      availableHeight,
+      floor((pixelWidth - sourceWidth) / 2),
+      0,
+      sourceWidth,
+      pixelHeight,
+    )
+  } else {
+    let sourceHeight = Geometry.clamp(1, pixelHeight, floor(pixelWidth / targetRatio));
+    Target(
+      0,
+      0,
+      availableWidth,
+      availableHeight,
+      0,
+      floor((pixelHeight - sourceHeight) / 2),
+      pixelWidth,
+      sourceHeight,
+    )
+  }
 };
 
-let toImgRgba = (img:Image) => {
-  let pixels = match(img.pixels) {
-    Some(p) => {p},
-    None => {?}
-  };
-  let pix = pixels.bytes;
-  let rec loop = (i, reversed) => {
-    if (i + 3 < Png.length(pix)) {
-      let rgba = Rgba(
-        Png.byte(pix, i),
-        Png.byte(pix, i + 1),
-        Png.byte(pix, i + 2),
-        Png.byte(pix, i + 3)
-      );
-      loop(i + 4, [rgba, ..reversed])
-    } else {
-      List.reverse(reversed)
-    }
-  };
-
-  let pixels = loop(0, []);
-  print (listTake(pixels, 1));
-  ImageRgba(img.width, img.height,pixels)
+let placementSize = (area, terminal, mode, pixelWidth, pixelHeight) => {
+  match(mode) {
+    Fit => { fitTarget(area, terminal, pixelWidth, pixelHeight) },
+    Fill => { fillTarget(area, terminal, pixelWidth, pixelHeight) },
+  }
 };
 
-let toIndexed = (img:ImageRgba) => {
-  let toIndexedPixel = (pixel) => {
-    if (pixel.a < 128) {
-      (Transparent, Rgb(0,0,0))
-    } else {
-      let d = 51;
-      let r6 = pixel.r / d
-        and g6 = pixel.g / d
-        and b6 = pixel.b / d;
-      let index = r6 * 36 
-        + g6 * 6
-        + b6;
-      let r = r6 * d
-        and g = g6 * d
-        and b = b6 * d;
-      (Color(index), Rgb(r,g,b))
-    }
-  };
-               
-  let (pixels, palette) = 
-    img.pixels
-      :>listMap(toIndexedPixel)
-      :>listUnzip;
-  IndexedImage(img.width, img.height, pixels, palette)
+-- Preserve the logical scale while clipping the raster in device pixels.
+-- Offsets stay cell-aligned; sampling uses the original scale even at an edge.
+let viewportTarget = (area: Geometry.Rect, viewport: Geometry.Rect, terminal, mode, width, height) => {
+  let target = placementSize(area, terminal, mode, width, height);
+  let (cw, ch) = cellPixels(terminal);
+  let x = (area.x + target.offsetX) * cw;
+  let y = (area.y + target.offsetY) * ch;
+  let raster = Geometry.rect(x, y, target.width, target.height);
+  let clipped = Geometry.intersect(raster, Geometry.rect(viewport.x * cw, viewport.y * ch, viewport.width * cw, viewport.height * ch));
+  Target(
+    (clipped.x - area.x * cw) / cw,
+    (clipped.y - area.y * ch) / ch,
+    clipped.width, clipped.height,
+    target.sourceX + (clipped.x - x) * target.sourceWidth / target.width,
+    target.sourceY + (clipped.y - y) * target.sourceHeight / target.height,
+    clipped.width * target.sourceWidth / target.width,
+    clipped.height * target.sourceHeight / target.height,
+  )
+};
+let placement = (area, terminal, mode, pixels: Png.Pixels) => {
+  placementSize(area, terminal, mode, pixels.width, pixels.height)
 };
 
-
-let add = (x,y) => {x+y};
-let rec listRange = (x,y) => {
-  if (x> y) {[]} else 
-  {[x, ..listRange(x+1,y)]}
-};
-
-let encode = (img: IndexedImage) => {
-  let mask = (img:IndexedImage, color, x, y) => {
-    [0,1,2,3,4,5] :>
-      List.foldLeft(0, (dy, acc) => {
-        if (y+dy < img.height 
-          && List.at(img.pixels, (y + dy) * img.width + x) == color) 
-        {
-          Byte.lor(acc, Byte.shl(1,dy))
+-- Nearest-neighbour resample into a buffer of 6x6x6 palette indices.
+-- `transparentIndex` marks pixels below half alpha; those stay `?` in sixel.
+let buildIndexed = (pixels: Png.Pixels, target: Target) => {
+  match(Buffer.alloc(target.width * target.height)) {
+    Err(_) => { None },
+    Ok(indexed) => {
+      let rec rows = (y) => {
+        if (y >= target.height) {
+          0
         } else {
-          acc
-        } 
-      })
-  };
-  let encodeColor = 
-    (image: IndexedImage, color, bandY) =>
-  {
-    listRange(0, image.width)
-      :> List.map((x) => {
-         mask (image, color, x, bandY)
-           :> add(63) 
-           :> fromCharCode
-           :> Text.of
-      })
-      :> List.foldLeft("", (acc,ch) => {acc ++ ch})
-  };
-  
-  
-  
-  ?
+          let sourceY = Geometry.clamp(
+            0,
+            pixels.height - 1,
+            floor(target.sourceY + y * target.sourceHeight / target.height),
+          );
+          let rec columns = (x) => {
+            if (x >= target.width) {
+              0
+            } else {
+              let sourceX = Geometry.clamp(
+                0,
+                pixels.width - 1,
+                floor(target.sourceX + x * target.sourceWidth / target.width),
+              );
+              let (red, green, blue, alpha) = Png.rgba(pixels, sourceX, sourceY);
+              let index = if (alpha < 128) {
+                transparentIndex
+              } else {
+                colorIndexOf(red, green, blue)
+              };
+              let _ = indexed
+                :> .writeUInt8(index, y * target.width + x)
+                :> Result.withDefault(0);
+              columns(x + 1)
+            }
+          };
+          let _ = columns(0);
+          rows(y + 1)
+        }
+      };
+      let _ = rows(0);
+      Some(indexed)
+    },
+  }
 };
 
-let write = (img, writer) => {
-  
+-- Palette entries actually used, in ascending index order.
+let usedColors = (indexed, count) => {
+  match(Buffer.alloc(paletteSize)) {
+    Err(_) => { [] },
+    Ok(seen) => {
+      let rec mark = (index) => {
+        if (index >= count) {
+          0
+        } else {
+          let value = Png.byte(indexed, index);
+          let _ = if (value < transparentIndex) {
+            seen :> .writeUInt8(1, value) :> Result.withDefault(0)
+          } else {
+            0
+          };
+          mark(index + 1)
+        }
+      };
+      let _ = mark(0);
+      let rec collect = (index, reversed) => {
+        if (index >= paletteSize) {
+          List.reverse(reversed)
+        } else {
+          if (Png.byte(seen, index) == 1) {
+            collect(index + 1, [index, ..reversed])
+          } else {
+            collect(index + 1, reversed)
+          }
+        }
+      };
+      collect(0, [])
+    },
+  }
 };
 
-let render = (area: Geometry.Rect, mode: Scale, image: Image) => {
+let paletteDefinitions = (colors) => {
+  List.foldLeft(colors, "", (acc, index) => {
+    let (red, green, blue) = colorOf(index);
+    acc ++ "#" ++ Text.of(index) ++ ";2;" ++
+      Text.of(red) ++ ";" ++ Text.of(green) ++ ";" ++ Text.of(blue)
+  })
+};
 
-  let imgrgb = toImgRgba(image);
-  let imgIndexed = toIndexed(imgrgb);
-  print(imgIndexed.width, imgIndexed.height);
-  let encoded = encode(imgIndexed);
-  //print1pix(pixels.bytes);
-  ?;
-  
-  let imageQuantizedColor = quantize(image);
-  
-  ""
+-- One color plane: a character per column, with `!count<char>` run compression.
+let encodePlane = (masks, color, width, extent) => {
+  let offsetOf = (x) => { color * width + x };
+  let rec runs = (x, reversed) => {
+    if (x >= extent) {
+      List.reverse(reversed)
+    } else {
+      let symbol = Png.byte(masks, offsetOf(x));
+      let character = 63 + symbol;
+      let rec same = (next) => {
+        if (next < extent) {
+          if (Png.byte(masks, offsetOf(next)) == symbol) {
+            same(next + 1)
+          } else {
+            next
+          }
+        } else {
+          next
+        }
+      };
+      let end = same(x + 1);
+      let count = end - x;
+      let encoded = if (count >= 4) {
+        "!" ++ Text.of(count) ++ fromCharCode(character)
+      } else {
+        repeatChar(fromCharCode(character), count)
+      };
+      runs(end, [encoded, ..reversed])
+    }
+  };
+  List.foldLeft(runs(0, []), "", (acc, piece) => { acc ++ piece })
+};
+
+-- Sixel data for one six-row band: build the per-color bit masks, then emit
+-- only the colors that appear in this band.
+let bandData = (indexed, width, height, y0) => {
+  match(Buffer.alloc(paletteSize * width)) {
+    Err(_) => { "" },
+    Ok(masks) => {
+      match(Buffer.alloc(paletteSize * 4)) {
+        Err(_) => { "" },
+        Ok(present) => {
+          let rec columns = (x) => {
+            if (x >= width) {
+              0
+            } else {
+              let rec rows = (dy) => {
+                if (dy >= bandRows) {
+                  0
+                } else {
+                  let y = y0 + dy;
+                  let _ = if (y < height) {
+                    let value = Png.byte(indexed, y * width + x);
+                    if (value < transparentIndex) {
+                      let offset = value * width + x;
+                      -- Each dy is visited exactly once for this column/color.
+                      -- Its bit is absent, so addition is the exact OR without
+                      -- an eight-step per-pixel bitwise emulation.
+                      let mask = Png.byte(masks, offset) + Byte.bit(dy);
+                      let _ = masks
+                        :> .writeUInt8(mask, offset)
+                        :> Result.withDefault(0);
+                      present
+                        :> .writeUInt32LE(x + 1, value * 4)
+                        :> Result.withDefault(0)
+                    } else {
+                      0
+                    }
+                  } else {
+                    0
+                  };
+                  rows(dy + 1)
+                }
+              };
+              let _ = rows(0);
+              columns(x + 1)
+            }
+          };
+          let _ = columns(0);
+          let rec emit = (color, acc) => {
+            if (color >= paletteSize) {
+              acc
+            } else {
+              let extent = present :> .readUInt32LE(color * 4) :> Result.withDefault(0);
+              if (extent > 0) {
+                emit(
+                  color + 1,
+                  acc ++ "#" ++ Text.of(color) ++ "$" ++
+                    encodePlane(masks, color, width, extent),
+                )
+              } else {
+                emit(color + 1, acc)
+              }
+            }
+          };
+          emit(0, "")
+        },
+      }
+    },
+  }
+};
+
+let rec emitBands = (indexed, width, height, y0, acc) => {
+  if (y0 >= height) {
+    acc
+  } else {
+    emitBands(
+      indexed,
+      width,
+      height,
+      y0 + bandRows,
+      acc ++ bandData(indexed, width, height, y0) ++ "-",
+    )
+  }
+};
+
+let indexedRasterMode = (indexed, width, height, transparent) => {
+  let colors = usedColors(indexed, width * height);
+  let raster = fromCharCode(34) ++ "1;1;" ++ Text.of(width) ++ ";" ++ Text.of(height);
+  Ansi.esc ++ (if (transparent) { "P0;1q" } else { "Pq" }) ++ raster ++ paletteDefinitions(colors) ++
+    emitBands(indexed, width, height, 0, "") ++ Ansi.esc ++ fromCharCode(92)
+};
+
+let indexedRaster = (indexed, width, height) => { indexedRasterMode(indexed, width, height, false) };
+
+-- Independent cell-row strips support every integer-row viewport crop. They
+-- share one resampled raster, so cropping never changes pixel sampling/scale.
+let rowRasters = (indexed: ByteBuffer, width, height, cellHeight) => {
+  let rec rows = (y) => {
+    if (y >= height || cellHeight <= 0) { [] } else {
+      let count = Geometry.clamp(1, cellHeight, height - y);
+      let slice = indexed :> .subarray(y * width, (y + count) * width) :> Result.debug;
+      [indexedRasterMode(slice, width, count, true), ..rows(y + count)]
+    }
+  };
+  rows(0)
+};
+let rasterData = (target: Target, pixels: Png.Pixels) => {
+  match(buildIndexed(pixels, target)) {
+    None => { "" },
+    Some(indexed) => { indexedRaster(indexed, target.width, target.height) },
+  }
+};
+
+let renderPixels = (area: Geometry.Rect, target: Target, pixels: Png.Pixels) => {
+  if (target.width <= 0 || target.height <= 0) { "" } else {
+    Ansi.cursorTo(area.y + target.offsetY + 1, area.x + target.offsetX + 1) ++ rasterData(target, pixels)
+  }
+};
+
+let renderFrom = (
+  area: Geometry.Rect,
+  terminal: Geometry.Size,
+  mode: Scale,
+  pixels: Png.Pixels,
+) => {
+  renderPixels(area, placement(area, terminal, mode, pixels), pixels)
+};
+
+let render = (
+  area: Geometry.Rect,
+  terminal: Geometry.Size,
+  mode: Scale,
+  image: Image,
+) => {
+  if (area.width <= 0 || area.height <= 0 || image.width <= 0 || image.height <= 0) {
+    ""
+  } else {
+    match(image.pixels) {
+      Some(pixels) => { renderFrom(area, terminal, mode, pixels) },
+      None => {
+        if (image.base64 == "") {
+          ""
+        } else {
+          match(Png.decode(image.base64)) {
+            Err(_) => { "" },
+            Ok(pixels) => { renderFrom(area, terminal, mode, pixels) },
+          }
+        }
+      },
+    }
+  }
 };

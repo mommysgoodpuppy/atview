@@ -7,8 +7,9 @@ from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
 from "../tui/image.wm" import * as Image;
 from "../tui/resource.wm" import * as Resource;
+from "../tui/scroll.wm" import * as Scroll;
 
-type FeedView = Timeline | OwnPosts;
+type FeedView = Timeline | OwnPosts | GeneratorFeed<String> | ListTimeline<String>;
 
 type UiThread =
   | UiThreadPost<Views.Post, Option<Image.Image>, List<UiThread>>
@@ -37,14 +38,61 @@ record UiPost = {
   avatar: Resource.Resource<String, Option<Image.Image>>,
 };
 
+record FeedTab = {
+  view: FeedView,
+  title: String,
+  posts: List<UiPost>,
+  cursor: Option<String>,
+  loaded: Bool,
+  loading: Bool,
+  status: String,
+  selected: Number,
+  scrollRows: Number,
+};
+
+record PostReaction = {
+  uri: String,
+  viewerLike: Option<String>,
+  likeCount: Option<Number>,
+  pending: Bool,
+};
+
 record UiFeeds = {
   handle: String,
   did: String,
   accessJwt: String,
-  timelinePosts: List<UiPost>,
-  ownPosts: List<UiPost>,
-  timelineCursor: Option<String>,
-  ownCursor: Option<String>,
+  tabs: List<FeedTab>,
+  reactions: List<PostReaction>,
+  reactionVersion: Number,
+  preloadVersion: Number,
+};
+
+let sameView = match(left, right) => {
+  (Timeline, Timeline) => { true },
+  (OwnPosts, OwnPosts) => { true },
+  (GeneratorFeed(left), GeneratorFeed(right)) => { left == right },
+  (ListTimeline(left), ListTimeline(right)) => { left == right },
+  _ => { false },
+};
+let emptyTab = (view, title) => {
+  FeedTab(view, title, [], None, false, false, "", 0, 0)
+};
+let makeUiFeeds = (handle, did, jwt, timeline, own, timelineCursor, ownCursor) => {
+  UiFeeds(handle, did, jwt, [
+    FeedTab(Timeline, "Following", timeline, timelineCursor, true, false, "", 0, 0),
+    FeedTab(OwnPosts, "My posts", own, ownCursor, true, false, "", 0, 0),
+  ], [], 0, 0)
+};
+let tabFor = (feeds: UiFeeds, view) => {
+  List.find(feeds.tabs, (tab) => { sameView(tab.view, view) })
+};
+let tabValue = (feeds: UiFeeds, view) => {
+  tabFor(feeds, view) :> Option.withDefault(emptyTab(view, "Feed"))
+};
+let modifyTab = (feeds: UiFeeds, view, transform) => {
+  .{ ..feeds, preloadVersion = feeds.preloadVersion + 1, tabs = feeds.tabs :> List.map((tab) => {
+    if (sameView(tab.view, view)) { transform(tab) } else { tab }
+  }) }
 };
 
 record UiState = {
@@ -69,21 +117,9 @@ record FeedLayout = {
   scale: Image.Scale,
 };
 
-record WindowLayout = {
-  width: Number,
-  height: Number,
-  size: Geometry.Size,
-  scale: Image.Scale,
-};
-
 record CardCursor = {
   selected: Number,
   index: Number,
-};
-
-record PostRows = {
-  first: String,
-  second: String,
 };
 
 record PaneLayout = {
@@ -168,14 +204,18 @@ type RenderDependency =
   | SelectionSurface
   | MediaSurface
   | ThreadSurface
-  | FooterSurface;
+  | FooterSurface
+  | TabsSurface
+  | ReactionSurface;
 
 record RenderModel = {
   state: UiState,
   size: Geometry.Size,
   start: Number,
+  scrollInset: Number,
   scrollOffset: Number,
   scrollTarget: Number,
+  tabScroll: Scroll.Motion,
 };
 
 let rec graphCounts = match(graph) => {
@@ -222,7 +262,7 @@ let countText = (value) => {
 };
 
 let move = (count, delta, state) => {
-  let selected = Geometry.clamp(0, count - 1, state.selected + delta);
+  let selected = Geometry.clamp(0, Geometry.nonNegative(count - 1), state.selected + delta);
   UiState(
     selected,
     state.view,
@@ -250,9 +290,9 @@ let imageScaleName = match(scale) => {
   Image.Fill => { "fill" },
 };
 
-let postsFor = match(feeds, view) => {
-  (_, Timeline) => { feeds.timelinePosts },
-  (_, OwnPosts) => { feeds.ownPosts },
+let postsFor = (feeds, view) => {
+  let tab = tabValue(feeds, view);
+  tab.posts
 };
 
 let hideMedia = match(resource) => {
@@ -260,27 +300,40 @@ let hideMedia = match(resource) => {
   _ => { resource },
 };
 
-let rec hidePostImages = match(posts) => {
-  [] => { [] },
-  [post, ..tail] => {
-    let current: UiPost = post;
-    [
-      UiPost(
-        current.post,
-        hideMedia(current.image),
-        hideMedia(current.avatar),
-      ),
-      ..hidePostImages(tail)
-    ]
-  },
-};
-
+-- Visibility is a drawing concern: retain media metadata for stable layout.
 let postsForState = (state: UiState) => {
-  let posts = postsFor(state.feeds, state.view);
-  if (state.scrolling) { hidePostImages(posts) } else { posts }
+  postsFor(state.feeds, state.view)
 };
 
-let titleFor = match(feeds, view) => {
-  (_, Timeline) => { "timeline" },
-  (_, OwnPosts) => { "@" ++ feeds.handle },
+let titleFor = (feeds, view) => {
+  let tab = tabValue(feeds, view);
+  tab.title
+};
+
+-- Keep one row for tabs and one for the footer in every pane calculation.
+let contentBody = (size: Geometry.Size) => {
+  Geometry.rect(0, 1, size.width, Geometry.nonNegative(size.height - 2))
+};
+
+let activeTabIndex = (state: UiState) => {
+  let rec find = match(tabs, index) => {
+    ([], _) => { 0 },
+    ([tab, ..tail], _) => {
+      if (sameView(tab.view, state.view)) { index } else { find(tail, index + 1) }
+    },
+  };
+  find(state.feeds.tabs, 0)
+};
+
+let heart = match(like) => { None => { "" }, Some(_) => { "❤️ " } };
+let selectedLikePending = (state: UiState) => {
+  match(List.at(postsForState(state), state.selected)) {
+    None => { false },
+    Some(item) => {
+      List.any(state.feeds.reactions, (reaction) => { reaction.uri == item.post.uri && reaction.pending })
+    },
+  }
+};
+let footerStatus = (state: UiState) => {
+  if (selectedLikePending(state)) { "saving like…" } else { state.status }
 };

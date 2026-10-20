@@ -49,17 +49,20 @@ record ImageViewWire = {
 };
 
 record ImagesViewWire = {
-  images: Js.Array<ImageViewWire>,
+  images: Js.Array<Js.Object>,
 };
 
 record RecordWithMediaViewWire = {
   media: Js.Object,
 };
 
+record AspectRatio = { width: Number, height: Number };
+
 record PostImage = {
   thumb: String,
   fullsize: String,
   alt: String,
+  aspectRatio: Option<AspectRatio>,
 };
 
 record Post = {
@@ -74,6 +77,7 @@ record Post = {
   likeCount: Option<Number>,
   quoteCount: Option<Number>,
   image: Option<PostImage>,
+  viewerLike: Option<String>,
 };
 
 record FeedItemWire = {
@@ -152,14 +156,27 @@ let decodeActor = (body) => {
   })
 };
 
+let decodeImageView = (body: Js.Object) => {
+  let wire: Result<ImageViewWire, Js.Error> = body :> Json.assert;
+  Result| wire, Boundary.optionalObject(body, "aspectRatio") | :> Result.andThen((image, raw) => {
+    let ratio = match(raw) {
+      None => { Ok(None) },
+      Some(value) => {
+        let decoded: Result<AspectRatio, Js.Error> = value :> Json.assert;
+        decoded :> Result.map((aspect) => {
+          if (aspect.width > 0 && aspect.height > 0) { Some(aspect) } else { None }
+        })
+      },
+    };
+    ratio :> Result.map((aspect) => { PostImage(image.thumb, image.fullsize, image.alt, aspect) })
+  })
+};
 let decodeImagesView = (body) => {
   let wire: Result<ImagesViewWire, Js.Error> = body :> Json.assert;
-  wire :> Result.map((view) => {
+  wire :> Result.andThen((view) => {
     match(Js.Array.toList(view.images)) {
-      [] => { None },
-      [image, .._] => {
-        Some(PostImage(image.thumb, image.fullsize, image.alt))
-      },
+      [] => { Ok(None) },
+      [image, .._] => { decodeImageView(image) :> Result.map(Some) },
     }
   })
 };
@@ -190,6 +207,15 @@ let decodePostImage = (body) => {
   })
 };
 
+let decodeViewerLike = (body) => {
+  Boundary.optionalObject(body, "viewer") :> Result.andThen((viewer) => {
+    match(viewer) {
+      None => { Ok(None) },
+      Some(value) => { Boundary.optionalString(value, "like") },
+    }
+  })
+};
+
 let decodePost = (body) => {
   let wire: Result<PostViewWire, Js.Error> = body :> Json.assert;
   wire :> Result.andThen((post) => {
@@ -201,8 +227,9 @@ let decodePost = (body) => {
       Boundary.optionalNumber(body, "repostCount"),
       Boundary.optionalNumber(body, "likeCount"),
       Boundary.optionalNumber(body, "quoteCount"),
-      decodePostImage(body)
-    | :> Result.map((author, record, replies, reposts, likes, quotes, image) => {
+      decodePostImage(body),
+      decodeViewerLike(body)
+    | :> Result.map((author, record, replies, reposts, likes, quotes, image, viewerLike) => {
       Post(
         post.uri,
         post.cid,
@@ -215,6 +242,7 @@ let decodePost = (body) => {
         likes,
         quotes,
         image,
+        viewerLike,
       )
     })
   })

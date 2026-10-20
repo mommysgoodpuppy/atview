@@ -1,0 +1,24 @@
+from "./geometry.wm" import * as Geometry;
+from "./reachability.wm" import * as Reach;
+let expect = (condition, message) => { if (condition) { void } else { Panic(message) } };
+let main = () => {
+  let active = Reach.expand(Geometry.rect(0, 20, 10, 10), Geometry.rect(0, 0, 10, 100), 0, 10, 0, 20);
+  expect(active.nearby == Geometry.rect(0, 10, 10, 40), "nearby viewport must expand without changing actual visible viewport");
+  let edge = Reach.expand(Geometry.rect(0, 0, 10, 10), Geometry.rect(0, 0, 10, 15), 0, 10, 0, 20);
+  expect(edge.nearby == Geometry.rect(0, 0, 10, 15), "nearby viewport must stay within content bounds");
+  let linked = Reach.Viewport(Geometry.rect(0, 0, 10, 10), Geometry.rect(0, 0, 10, 10));
+  let surfaces = [Reach.Surface("current", active, 0), Reach.Surface("next", linked, 1)];
+  let candidates = [
+    Reach.Candidate("next", Geometry.rect(0, 0, 10, 5), "linked"),
+    Reach.Candidate("current", Geometry.rect(0, 12, 10, 5), "near"),
+    Reach.Candidate("current", Geometry.rect(0, 24, 10, 5), "visible"),
+    Reach.Candidate("unlinked", Geometry.rect(0, 24, 10, 5), "unreachable"),
+    Reach.Candidate("current", Geometry.rect(0, 50, 10, 5), "outside"),
+    Reach.Candidate("current", Geometry.rect(0, 28, 10, 5), "visible-2"),
+  ];
+  let ranked = Reach.rank(surfaces, candidates, (a, b) => { a == b });
+  expect(ranked :> List.map((item) => { item.value }) == ["visible", "visible-2", "linked", "near"], "rank visible before adjacent destination frames before spatially near; preserve order within each rank");
+  let duplicate = Reach.rank(List.append(surfaces, [Reach.Surface("next", linked, 1)]), candidates, (a, b) => { a == b });
+  expect(duplicate == ranked, "overlapping semantic links must not duplicate resource requests");
+  print("reachability probe: ok")
+};

@@ -1,0 +1,62 @@
+-- Native identity keys for immutable values at the terminal host boundary.
+-- Weak keys do not retain image payloads after application/cache eviction.
+from js.global import { WeakMap };
+from js.global("WeakMap") import unsafe { prototype: Js.Value };
+from js.global("Reflect") import unsafe {
+  get as opaqueGet: (Js.Value, String) -> Js.Value,
+  apply as lookup: (Js.Value, Js.Value, Js.Value) -> Option<Number>,
+  apply as assign: (Js.Value, Js.Value, Js.Value) -> Js.Value,
+};
+from js.global("Reflect") import { get, set };
+let weakGet = opaqueGet(prototype, "get");
+let weakSet = opaqueGet(prototype, "set");
+let identities = WeakMap.new() :> Result.debug;
+let counter = JSON{ value: 0 };
+let key = (object: Js.Value) => {
+  match(lookup(weakGet, identities, Js.Array.fromList([object]))) {
+    Some(identifier) => { identifier },
+    None => {
+      let previous: Result<Number, Js.Error> = get(counter, "value") :> Result.andThen(Json.assert);
+      let next = (previous :> Result.withDefault(0)) + 1;
+      let _ = set(counter, "value", next);
+      let arguments = JSON[object, next];
+      let _ = assign(weakSet, identities, arguments);
+      next
+    },
+  }
+};
+
+-- Intern equal encoded assets once, while keeping subsequent frame lookups on
+-- the weak object key. This preserves sharing between separate copies of an
+-- avatar without repeatedly comparing the PNG strings during every scroll.
+from js.global import { Map };
+from js.global("Map") import unsafe { prototype as mapPrototype: Js.Value };
+from js.global("Math") import unsafe { floor: Number -> Number };
+let contentIds = Map.new() :> Result.debug;
+let contentSlots = JSON{};
+let mapGet = opaqueGet(mapPrototype, "get");
+let mapSet = opaqueGet(mapPrototype, "set");
+let mapDelete = opaqueGet(mapPrototype, "delete");
+let keyFor = (object: Js.Value, content: String) => {
+  match(lookup(weakGet, identities, Js.Array.fromList([object]))) {
+    Some(identifier) => { identifier },
+    None => {
+      match(lookup(mapGet, contentIds, JSON[content])) {
+        Some(identifier) => {
+          let _ = assign(weakSet, identities, JSON[object, identifier]);
+          identifier
+        },
+        None => {
+          let identifier = key(object);
+          let slot = Text.of(identifier - floor(identifier / 256) * 256);
+          let previous: Result<String, Js.Error> = get(contentSlots, slot) :> Result.andThen(Json.assert);
+          let old = previous :> Result.withDefault("");
+          if (old != "") { let _ = assign(mapDelete, contentIds, JSON[old]); void } else { void };
+          let _ = set(contentSlots, slot, content);
+          let _ = assign(mapSet, contentIds, JSON[content, identifier]);
+          identifier
+        },
+      }
+    },
+  }
+};

@@ -1,6 +1,6 @@
 from "./geometry.wm" import * as Geometry;
 from "./halfblock.wm" import * as HalfBlock;
-from "./kitty.wm" import * as Kitty;
+from "./image.wm" import * as Image;
 from "./png.wm" import * as Png;
 
 let main = () => {
@@ -9,7 +9,7 @@ let main = () => {
     Err(_) => { print("png decode failed") },
     Ok(pixels) => {
       let (red, green, blue, alpha) = Png.rgba(pixels, 0, 0);
-      let rendered = HalfBlock.render(Geometry.rect(0, 0, 1, 1), Kitty.Fill, Kitty.Image(base64, "", 1, 1, Some(pixels)));
+      let rendered = HalfBlock.render(Geometry.rect(0, 0, 1, 1), Image.Fill, Image.Image(base64, "", 1, 1, Some(pixels)));
       if (pixels.width == 1 && pixels.height == 1 && red == 255 && green == 0 && blue == 0 && alpha == 127 && rendered != "") {
         print("half-block png ok")
       } else {

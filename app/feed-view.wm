@@ -8,35 +8,32 @@ from "../tui/draw.wm" import * as Draw;
 from "../tui/element.wm" import * as Ui;
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
+from "../tui/image-host.wm" import * as ImageHost;
 from "../tui/image.wm" import * as Image;
 from "../tui/resource.wm" import * as Resource;
 
 let wrapOnce = (text, width) => {
-  let cleaned = text :> .replaceAll("\n", " ") :> Result.withDefault(text);
-  let size = cleaned :> .length :> Result.withDefault(0);
-  if (width <= 0 || size <= width) {
-    (cleaned, "")
-  } else {
-    let candidate = cleaned :> .slice(0, width + 1) :> Result.withDefault(cleaned);
-    let space = candidate :> .lastIndexOf(" ") :> Result.withDefault(-1);
-    let boundary = if (space <= 0) { width } else { space };
-    let next = if (space <= 0) { boundary } else { boundary + 1 };
+  let size = text :> .length :> Result.withDefault(0);
+  let newline = text :> .indexOf("\n") :> Result.withDefault(-1);
+  if (newline >= 0 && (width <= 0 || newline <= width)) {
     (
-      cleaned :> .slice(0, boundary) :> Result.withDefault(""),
-      cleaned :> .slice(next) :> Result.withDefault(""),
+      text :> .slice(0, newline) :> Result.withDefault(""),
+      text :> .slice(newline + 1) :> Result.withDefault(""),
     )
-  }
-};
-
-let postRows = (text, width) => {
-  let (first, afterFirst) = wrapOnce(text, width);
-  let (second, remaining) = wrapOnce(afterFirst, width);
-  let finalSecond = if (remaining == "" || width <= 1) {
-    second
   } else {
-    (second :> .slice(0, width - 1) :> Result.withDefault(second)) ++ "…"
-  };
-  PostRows(first, finalSecond)
+    if (width <= 0 || size <= width) {
+      (text, "")
+    } else {
+      let candidate = text :> .slice(0, width + 1) :> Result.withDefault(text);
+      let space = candidate :> .lastIndexOf(" ") :> Result.withDefault(-1);
+      let boundary = if (space <= 0) { width } else { space };
+      let next = if (space <= 0) { boundary } else { boundary + 1 };
+      (
+        text :> .slice(0, boundary) :> Result.withDefault(""),
+        text :> .slice(next) :> Result.withDefault(""),
+      )
+    }
+  }
 };
 
 let rec wrapLines = match(text, width, remaining) => {
@@ -49,22 +46,48 @@ let rec wrapLines = match(text, width, remaining) => {
   },
 };
 
+-- The text length bounds the number of rows even at a one-column width.
+let postLines = (text, width) => {
+  wrapLines(text, width, (text :> .length :> Result.withDefault(0)) + 1)
+};
+
 let rec indentation = (depth) => {
   if (depth <= 0) { "" } else { "  " ++ indentation(depth - 1) }
 };
 
 let metrics = (post) => {
-  countText(post.replyCount) ++ " replies   " ++
+  heart(post.viewerLike) ++ countText(post.replyCount) ++ " replies   " ++
     countText(post.repostCount) ++ " reposts   " ++
     countText(post.likeCount) ++ " likes"
 };
 
-let imageRows = (width, maximum, size, scale, item) => {
-  match(item.post.image) {
-    None => { 0 },
-    Some(_) => {
-      if (maximum <= 0 || width <= 0) { 0 } else { maximum }
+let pendingImageRows = (width, maximum, size, scale, source: Views.PostImage) => {
+  match(scale, source.aspectRatio) {
+    (Image.Fit, Some(ratio)) => {
+      Image.fitRows(width, maximum, size, Image.Image("", "", ratio.width, ratio.height, None))
     },
+    -- Without metadata, use a small explicit placeholder rather than a large
+    -- blank image frame. Loading may still reflow posts with unknown ratios.
+    (Image.Fit, None) => { Geometry.clamp(0, maximum, 2) },
+    (Image.Fill, _) => { maximum },
+  }
+};
+
+let imageRows = (width, maximum, size, scale, item: UiPost) => {
+  if (maximum <= 0 || width <= 0) { 0 } else {
+    match(item.post.image, item.image) {
+      (None, _) => { 0 },
+      (_, Resource.Ready(Some(image))) => {
+        match(scale) {
+          Image.Fit => { Image.fitRows(width, maximum, size, image) },
+          Image.Fill => { maximum },
+        }
+      },
+      (Some(source), Resource.Pending) => { pendingImageRows(width, maximum, size, scale, source) },
+      (Some(source), Resource.Loading) => { pendingImageRows(width, maximum, size, scale, source) },
+      (_, Resource.Ready(None)) => { 0 },
+      (_, Resource.Failed(_)) => { 0 },
+    }
   }
 };
 
@@ -83,12 +106,12 @@ let baseCardHeight = (width, size, item) => {
   let textWidth = Geometry.nonNegative(
     width - 2 - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
   );
-  let text = postRows(item.post.text, textWidth);
-  if (text.second == "") { 5 } else { 6 }
+  let lines = postLines(item.post.text, textWidth);
+  4 + List.length(lines)
 };
 
 let maximumCardHeight = (size: Geometry.Size) => {
-  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
+  let body = contentBody(size);
   if (phoneAspect(body, size)) {
     Geometry.clamp(12, 28, Geometry.percentOf(body.height, 85))
   } else {
@@ -116,35 +139,6 @@ let rec cardHeights = match(posts, layout) => {
   },
 };
 
-let rec heightOfFirst = (posts, count, layout: FeedLayout) => {
-  if (count <= 0) {
-    0
-  } else {
-    match(posts) {
-      [] => { 0 },
-      [item, ..tail] => {
-        let height = cardHeight(layout.width, layout.size, layout.scale, item);
-        let rest = heightOfFirst(tail, count - 1, layout);
-        height + (if (rest <= 0) { 0 } else { rest - 1 })
-      },
-    }
-  }
-};
-
-let rec visibleStart = (posts, selected, start, window: WindowLayout) => {
-  let layout = FeedLayout(window.width, window.size, window.scale);
-  let needed = heightOfFirst(
-    List.drop(posts, start),
-    selected - start + 1,
-    layout,
-  );
-  if (needed <= window.height || start >= selected) {
-    start
-  } else {
-    visibleStart(posts, selected, start + 1, window)
-  }
-};
-
 let cardText = (area, row, x, width, value, style) => {
   Ui.showIf(
     row < area.height - 1,
@@ -156,28 +150,37 @@ let cardText = (area, row, x, width, value, style) => {
   )
 };
 
-let card = (area, item, size, scale, joinedBottom, avatarId) => {
+let cardMetrics = (area, item, size, scale) => {
+  let columns = avatarColumns(2, size, item.avatar);
+  let gap = if (columns > 0) { 1 } else { 0 };
+  let width = Geometry.nonNegative(area.width - 2 - columns - gap);
+  let row = cardHeight(area.width, size, scale, item) - 2;
+  let rect = Geometry.rect(area.x + 1 + columns + gap, area.y + row, width, 1);
+  Ui.showIf(row < area.height - 1 && rect.y >= 1,
+    Ui.fragment([Ui.fill(rect, " ", Draw.plain), Ui.text(rect, metrics(item.post) ++ "   " ++ item.post.createdAt, Draw.muted)]))
+};
+
+let card = (area, item, size, scale, joinedBottom, avatarId, showImages) => {
   let innerWidth = Geometry.nonNegative(area.width - 2);
-  let avatarRows = if (area.height > 3) { 2 } else { 0 };
+  let avatarRows = if (cardHeight(area.width, size, scale, item) > 3) { 2 } else { 0 };
   let avatarColumns = avatarColumns(avatarRows, size, item.avatar);
   let textX = area.x + 1 + avatarColumns +
     (if (avatarColumns > 0) { 1 } else { 0 });
   let textWidth = Geometry.nonNegative(
     innerWidth - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
   );
-  let text = postRows(item.post.text, textWidth);
-  let secondLine = text.second != "";
-  let mediaRow = if (secondLine) { 4 } else { 3 };
-  let metricsRow = Geometry.nonNegative(area.height - 2);
+  let lines = postLines(item.post.text, textWidth);
+  let mediaRow = 2 + List.length(lines);
+  let metricsRow = cardHeight(area.width, size, scale, item) - 2;
   let rows = imageRows(
     textWidth,
-    Geometry.nonNegative(metricsRow - mediaRow),
+    Geometry.nonNegative(maximumCardHeight(size) - baseCardHeight(area.width, size, item)),
     size,
     scale,
     item,
   );
   Ui.fragment([
-    Ui.timelineBox(area, false, area.y > 0, joinedBottom),
+    Ui.timelineBox(area, false, area.y > 1, joinedBottom),
     cardText(
       area,
       1,
@@ -186,35 +189,14 @@ let card = (area, item, size, scale, joinedBottom, avatarId) => {
       item.post.authorName ++ "  @" ++ item.post.authorHandle,
       Draw.plain,
     ),
-    cardText(
-      area,
-      2,
-      textX,
-      textWidth,
-      text.first,
+    Ui.lines(
+      Geometry.rect(textX, area.y + 2, textWidth, Geometry.nonNegative(area.height - 3)),
+      lines,
       Draw.plain,
     ),
-    Ui.showIf(
-      secondLine,
-      cardText(
-        area,
-        3,
-        textX,
-        textWidth,
-        text.second,
-        Draw.plain,
-      ),
-    ),
-    cardText(
-      area,
-      metricsRow,
-      textX,
-      textWidth,
-      metrics(item.post) ++ "   " ++ item.post.createdAt,
-      Draw.muted,
-    ),
+    cardMetrics(area, item, size, scale),
     Ui.suspense(
-      item.avatar,
+      if (showImages) { item.avatar } else { hideMedia(item.avatar) },
       Ui.fill(
         Geometry.rect(area.x + 1, area.y + 1, avatarColumns, avatarRows),
         "░",
@@ -223,9 +205,10 @@ let card = (area, item, size, scale, joinedBottom, avatarId) => {
       (_) => { Ui.empty },
       (avatar) => {
         Ui.optional(avatar, (image) => {
-          Ui.image(
+          Ui.imageViewport(
             avatarId,
             Geometry.rect(area.x + 1, area.y + 1, avatarColumns, avatarRows),
+            contentBody(size),
             Image.Fill,
             image,
           )
@@ -233,14 +216,15 @@ let card = (area, item, size, scale, joinedBottom, avatarId) => {
       },
     ),
     Ui.suspense(
-      item.image,
-      Ui.empty,
+      if (showImages) { item.image } else { hideMedia(item.image) },
+      Ui.textViewport(Geometry.rect(textX, area.y + mediaRow, textWidth, rows), contentBody(size), "loading image…", "", Draw.muted),
       (_) => { Ui.empty },
       (image) => {
         Ui.optional(image, (value) => {
-          Ui.image(
+          Ui.imageViewport(
             99000 + avatarId,
             Geometry.rect(textX, area.y + mediaRow, textWidth, rows),
+            contentBody(size),
             scale,
             value,
           )
@@ -252,27 +236,27 @@ let card = (area, item, size, scale, joinedBottom, avatarId) => {
 
 let cardMedia = (area, item, size, scale, imageId, showImages) => {
   let innerWidth = Geometry.nonNegative(area.width - 2);
-  let avatarRows = if (area.height > 3) { 2 } else { 0 };
+  let avatarRows = if (cardHeight(area.width, size, scale, item) > 3) { 2 } else { 0 };
   let avatarColumns = avatarColumns(avatarRows, size, item.avatar);
   let textX = area.x + 1 + avatarColumns +
     (if (avatarColumns > 0) { 1 } else { 0 });
   let textWidth = Geometry.nonNegative(
     innerWidth - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
   );
-  let text = postRows(item.post.text, textWidth);
-  let mediaRow = if (text.second != "") { 4 } else { 3 };
-  let metricsRow = Geometry.nonNegative(area.height - 2);
+  let lines = postLines(item.post.text, textWidth);
+  let mediaRow = 2 + List.length(lines);
+  let metricsRow = cardHeight(area.width, size, scale, item) - 2;
   let rows = imageRows(
     textWidth,
-    Geometry.nonNegative(metricsRow - mediaRow),
+    Geometry.nonNegative(maximumCardHeight(size) - baseCardHeight(area.width, size, item)),
     size,
     scale,
     item,
   );
-  let mediaArea = Geometry.rect(textX, area.y + mediaRow, textWidth, rows);
+  let mediaArea = Geometry.intersect(Geometry.rect(textX, area.y + mediaRow, textWidth, rows), contentBody(size));
   let image = if (showImages) {
     Ui.optional(mediaValue(item.image), (value) => {
-      Ui.image(imageId, mediaArea, scale, value)
+      Ui.imageViewport(imageId, Geometry.rect(textX, area.y + mediaRow, textWidth, rows), contentBody(size), scale, value)
     })
   } else {
     Ui.empty
@@ -280,7 +264,7 @@ let cardMedia = (area, item, size, scale, imageId, showImages) => {
   if (rows <= 0) {
     ""
   } else {
-    Kitty.deleteImage(imageId) ++ Draw.fill(mediaArea, " ", Draw.plain) ++
+    ImageHost.deleteImage(imageId) ++ Draw.fill(mediaArea, " ", Draw.plain) ++
       Ui.render(size, image)
   }
 };
@@ -320,9 +304,9 @@ let renderMediaCards = (area, posts, start, layout, showImages) => {
   mediaCards(area, posts, start, layout, showImages)
 };
 
-let rec cards = match(area, posts, index, layout) => {
-  (_, [], _, _) => { Ui.empty },
-  (_, _, _, _) => {
+let rec cards = match(area, posts, index, layout, showImages) => {
+  (_, [], _, _, _) => { Ui.empty },
+  (_, _, _, _, _) => {
     match(posts) {
       [] => { Ui.empty },
       [item, ..tail] => {
@@ -343,6 +327,7 @@ let rec cards = match(area, posts, index, layout) => {
               layout.scale,
               joinedBottom,
               1000 + index,
+              showImages,
             ),
             cards(
               Geometry.rect(
@@ -354,6 +339,7 @@ let rec cards = match(area, posts, index, layout) => {
               tail,
               index + 1,
               layout,
+              showImages,
             ),
           ])
         }
@@ -363,5 +349,23 @@ let rec cards = match(area, posts, index, layout) => {
 };
 
 let renderCards = (area, posts, index, layout: FeedLayout) => {
-  Ui.render(layout.size, cards(area, posts, index, layout))
+  Ui.render(layout.size, cards(area, posts, index, layout, true))
 };
+
+let renderCardsVisible = (area, posts, index, layout: FeedLayout, showImages) => {
+  Ui.render(layout.size, cards(area, posts, index, layout, showImages))
+};
+
+let rec metricCards = match(area, posts, layout) => {
+  (_, [], _) => { Ui.empty },
+  (_, [item, ..tail], _) => {
+    if (area.height < 2) { Ui.empty } else {
+      let height = Geometry.clamp(2, cardHeight(area.width, layout.size, layout.scale, item), area.height);
+      Ui.fragment([
+        cardMetrics(Geometry.rect(area.x, area.y, area.width, height), item, layout.size, layout.scale),
+        metricCards(Geometry.rect(area.x, area.y + height - 1, area.width, area.height - height + 1), tail, layout),
+      ])
+    }
+  },
+};
+let renderMetrics = (area, posts, layout: FeedLayout) => { Ui.render(layout.size, metricCards(area, posts, layout)) };

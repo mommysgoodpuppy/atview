@@ -1,0 +1,67 @@
+-- Content-sized tab labels, scrolled just enough to keep the active tab visible.
+from "./geometry.wm" import * as Geometry;
+from "./draw.wm" import * as Draw;
+from "./scroll.wm" import * as Scroll;
+
+let tabWidth = (label: String, available) => {
+  let length = Draw.safeText(label) :> .length :> Result.withDefault(0);
+  Geometry.clamp(0, available, Geometry.clamp(3, 32, length + 2))
+};
+let rec fitCount = match(labels, available, remaining) => {
+  ([], _, _) => { 0 },
+  ([label, ..tail], _, _) => {
+    let width = tabWidth(label, available);
+    if (width <= 0 || remaining <= 0) { 0 } else {
+      if (width >= remaining) { 1 } else {
+        1 + fitCount(tail, available, remaining - width)
+      }
+    }
+  },
+};
+let track = (width, labels) => {
+  let available = Geometry.nonNegative(width - 8);
+  Scroll.Strip(labels :> List.map((label) => { tabWidth(label, available) }), available, 0)
+};
+let window = (width, labels, selected) => {
+  let strip = track(width, labels);
+  let offset = Scroll.reveal(strip, selected, 0);
+  let viewport = Scroll.locateAxis(strip, offset);
+  (viewport.start, fitCount(List.drop(labels, viewport.start), strip.viewport, strip.viewport + viewport.inset))
+};
+let renderAt = (area: Geometry.Rect, labels, selected, offset) => {
+  let strip = track(area.width, labels);
+  let viewport = Scroll.locateAxis(strip, offset);
+  let start = viewport.start;
+  let available = Geometry.nonNegative(area.width - 8);
+  let rec drawTabs = match(items, index, x) => {
+    ([], _, _) => { "" },
+    ([label, ..tail], _, _) => {
+      if (x >= area.x + area.width - 4) { "" } else {
+        let active = index == selected;
+        let width = tabWidth(label, available);
+        Draw.textViewport(
+          Geometry.rect(x, area.y, width, 1),
+          Geometry.rect(area.x + 4, area.y, available, 1),
+          (if (active) { "[" } else { " " }) ++
+            Draw.safeText(label) ++
+            (if (active) { "]" } else { " " }),
+          "..",
+          if (active) { Draw.accent } else { Draw.muted },
+        ) ++ drawTabs(tail, index + 1, x + width)
+      }
+    },
+  };
+  if (area.width < 12) {
+    Draw.fill(area, " ", Draw.status) ++
+      Draw.ellipsizedText(area, List.at(labels, selected) :> Option.withDefault(""), Draw.accent)
+  } else {
+    Draw.fill(area, " ", Draw.status) ++
+      Draw.text(Geometry.rect(area.x, area.y, 4, 1), "u ‹ ", Draw.muted) ++
+      drawTabs(List.drop(labels, start), start, area.x + 4 - viewport.inset) ++
+      Draw.text(Geometry.rect(area.x + area.width - 4, area.y, 4, 1), " › i", Draw.muted)
+  }
+};
+
+let render = (area: Geometry.Rect, labels, selected) => {
+  renderAt(area, labels, selected, Scroll.reveal(track(area.width, labels), selected, 0))
+};

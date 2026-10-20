@@ -1,0 +1,59 @@
+-- Local PNG reproduction fixture; public artwork stays outside the repository.
+from "../tui/image-host.wm" import * as Host;
+from "../tui/image.wm" import * as Image;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/png.wm" import * as Png;
+from "../tui/timer.wm" import * as Timer;
+from "./clock.wm" import * as Clock;
+from js.module("node:buffer") import { Buffer };
+from js.module("node:fs") import { readFileSync, writeFileSync };
+from js.global("Deno") import unsafe { args: Js.Array<String> };
+let expect = (condition, label) => { if (condition) { void } else { Host.stop(); Panic(label) } };
+let rec idle = (remaining, previous, maximum) => {
+  let elapsed = Clock.now() - previous;
+  let largest = if (elapsed > maximum) { elapsed } else { maximum };
+  if (Host.isIdle()) { Task.succeed(largest) } else {
+    if (remaining <= 0) { Host.stop(); Panic("worker timeout"); Task.succeed(largest) } else {
+      let now = Clock.now();
+      Timer.delay(5) :> Task.andThen((_) => { idle(remaining - 1, now, largest) })
+    }
+  }
+};
+let main = () => {
+  let path = match(Js.Array.toList(args)) { [path, .._] => { path }, _ => { "" }, };
+
+  expect(path != "", "pass a local PNG fixture path after --");
+  let base64 = readFileSync(path) :> Result.debug :> .toString("base64") :> Result.debug;
+  let bytes = Buffer.from(base64, "base64") :> Result.debug;
+  let width = Png.uint32(bytes, 16);
+  let height = Png.uint32(bytes, 20);
+  let image = Image.Image(base64, "", width, height, None);
+  let size = Geometry.Size(160, 50, 8, 16);
+  let area = Geometry.rect(2, 0, 50, 36);
+  Host.start((_) => { void });
+  let started = Clock.now();
+  let _ = Host.preloadClipped(area, area, size, Image.Fit, image);
+  idle(10000, started, 0) :> Task.map((heartbeat) => {
+    print("longest main-loop timer interval during cold preparation ms: " ++ Text.of(heartbeat));
+
+    print("worker preparation ms: " ++ Text.of(Clock.now() - started));
+    let full = Host.render(1, area, size, Image.Fit, image);
+    let partial = Host.renderClipped(1, area, Geometry.rect(0, 8, 80, 20), size, Image.Fit, image);
+    print("full bytes: " ++ Text.of(Buffer.from(full) :> Result.debug :> .length :> Result.debug));
+    print("partial bytes: " ++ Text.of(Buffer.from(partial) :> Result.debug :> .length :> Result.debug));
+    -- Save bytes outside timing for independent protocol and pixel inspection.
+    let _ = writeFileSync("/tmp/atview-image-crop-bench.txt", partial);
+    let rec frames = (index, total, maximum) => {
+      if (index >= 300) { print("crop assembly avg/max ms: " ++ Text.of(total / index) ++ "/" ++ Text.of(maximum)) } else {
+        let start = Clock.now();
+        let output = Host.renderClipped(1, Geometry.rect(2, 0 - (index % 20), 50, 36), Geometry.rect(0, 1, 80, 25), size, Image.Fit, image);
+        let _ = Buffer.from(output);
+        expect(Host.isIdle(), "first-pass scrolling queued another encoding");
+        let elapsed = Clock.now() - start;
+
+        frames(index + 1, total + elapsed, if (elapsed > maximum) { elapsed } else { maximum })
+      }
+    };
+    frames(0, 0, 0); Host.stop()
+  })
+};

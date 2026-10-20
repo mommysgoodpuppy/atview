@@ -1,0 +1,99 @@
+-- Cache every top/bottom viewport crop after a single image preparation.
+from "./image-host.wm" import * as Host;
+from "./image.wm" import * as Image;
+from "./geometry.wm" import * as Geometry;
+from "./png.wm" import * as Png;
+from "./sixel.wm" import * as Sixel;
+from "./timer.wm" import * as Timer;
+from "./ansi.wm" import * as Ansi;
+from "./terminal-cap.wm" import * as Cap;
+from js.module("node:buffer") import { Buffer };
+from js.global("Deno") import unsafe { args: Js.Array<String> };
+from js.global("JSON") import unsafe { stringify: Js.Value -> String };
+let expect = (condition, label) => { if (condition) { void } else { Host.stop(); Panic(label) } };
+let rec waitIdle = (remaining) => {
+  if (Host.isIdle()) { Task.succeed(void) } else {
+    if (remaining <= 0) { Host.stop(); Panic("partial image worker timed out") } else {
+      Timer.delay(5) :> Task.andThen((_) => { waitIdle(remaining - 1) })
+    }
+  }
+};
+let run = (size: Geometry.Size, image: Image.Image, pixels: Png.Pixels) => {
+  let outputs = Js.Array.fromList([]: List<String>);
+  Host.start((output) => { let _ = outputs :> .push(output); void });
+  let area = Geometry.rect(2, 2, 8, 7);
+  let viewport = Geometry.rect(0, 1, 20, 5);
+  let _ = Host.preloadClipped(area, area, size, Image.Fit, image);
+  waitIdle(1000) :> Task.map((_) => {
+    expect(Host.render(1, area, size, Image.Fit, image) == Sixel.render(area, size, Image.Fit, image), "full raster must retain its original encoding");
+    let reports = Js.Array.fromList([]: List<Js.Value>);
+    let (cw, ch) = Sixel.cellPixels(size);
+    let rec positions = (y, step) => {
+      if (y < -7 || y > 9) { void } else {
+        let moving = Geometry.rect(2, y, 8, 7);
+        let target = Sixel.viewportTarget(moving, viewport, size, Image.Fit, image.width, image.height);
+        let actual = Host.renderClipped(1, moving, viewport, size, Image.Fit, image);
+        if (target.width > 0 && target.height > 0) {
+          expect(actual != "", "every visible crop must render immediately without a worker roundtrip");
+          let expected = Sixel.render(moving, size, Image.Fit, image);
+          let report = JSON{ actual: actual, expected: expected, cw: cw, ch: ch,
+            left: viewport.x, top: viewport.y, width: viewport.width, height: viewport.height };
+          let _ = reports :> .push(report); void
+        } else { expect(actual == "", "fully offscreen image must draw nothing") };
+        expect(Host.isIdle(), "scrolling a prepared image must not queue crop encodings");
+        let _ = Host.deleteAll();
+        positions(y + step, step)
+      }
+    };
+    positions(-7, 1);
+    positions(9, -1);
+    expect(Js.Array.toList(outputs) == [], "cached crops must never arrive as delayed image writes");
+    if (Js.Array.toList(args) == ["--dump"]) {
+      print(stringify(JSON{ cases: reports }))
+    } else { void };
+    Host.stop(); void
+  })
+};
+let pendingCrop = (image) => {
+  let size = Geometry.Size(80, 24, 3, 5);
+  let viewport = Geometry.rect(0, 1, 20, 5);
+  let outputs = Js.Array.fromList([]: List<String>);
+  Host.start((output) => { let _ = outputs :> .push(output); void });
+  let full = Geometry.rect(2, 2, 8, 7);
+  let _ = Host.preloadClipped(full, full, size, Image.Fit, image);
+  let _ = Host.renderClipped(1, Geometry.rect(2, -1, 8, 7), viewport, size, Image.Fit, image);
+  let latest = Geometry.rect(2, 0, 8, 7);
+  let _ = Host.renderClipped(1, latest, viewport, size, Image.Fit, image);
+  waitIdle(1000) :> Task.map((_) => {
+    let expected = Host.renderClipped(1, latest, viewport, size, Image.Fit, image);
+    expect(Js.Array.toList(outputs) == [Ansi.beginSynchronizedUpdate ++ expected ++ Ansi.reset ++ Ansi.endSynchronizedUpdate], "in-flight completion must use the latest crop as well as its latest position");
+    Host.stop()
+  })
+};
+let main = () => {
+  expect(Cap.renderer == Cap.SixelRenderer, "run with ATVIEW_IMAGE_BACKEND=sixel");
+  let bytes = Buffer.alloc(64 * 83 * 4, 255) :> Result.debug;
+  let rec fill = (y) => {
+    if (y >= 83) { void } else {
+      let rec columns = (x) => {
+        if (x >= 64) { void } else {
+          let index = (y * 64 + x) * 4;
+          let _ = Png.writeByte(bytes, index, y * 3);
+          let _ = Png.writeByte(bytes, index + 1, x * 4);
+          let _ = Png.writeByte(bytes, index + 2, 255 - x * 4);
+          let _ = Png.writeByte(bytes, index + 3, if (x < 3) { 0 } else { 255 });
+          columns(x + 1)
+        }
+      };
+      columns(0); fill(y + 1)
+    }
+  };
+  fill(0);
+  let pixels = Png.Pixels(bytes, 64, 83);
+  let image = Image.Image("", "gradient", 64, 83, Some(pixels));
+  run(Geometry.Size(80, 24, 3, 5), image, pixels) :> Task.andThen((_) => {
+    run(Geometry.Size(80, 24, 8, 16), image, pixels)
+  }) :> Task.andThen((_) => {
+    run(Geometry.Size(80, 24, 1, 2), image, pixels)
+  }) :> Task.andThen((_) => { pendingCrop(image) }) :> Task.map((_) => { print("sixel partial probe: ok; bidirectional crops reuse prepared rows without delayed output") })
+};

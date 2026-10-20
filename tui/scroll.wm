@@ -1,6 +1,6 @@
--- Immutable row-based scrolling primitives.  Applications own the animation
--- clock; this module owns easing and translating a content offset into a
--- partially clipped list viewport.
+-- Immutable scrolling primitives shared by horizontal and vertical strips.
+-- Extents, overlap, reveal policy, offsets, easing, and frame cadence live here;
+-- applications translate clock ticks into immutable model transitions.
 
 from js.global("Math") import unsafe {
   floor: Number -> Number,
@@ -68,4 +68,82 @@ let rec locateFrom = match(heights, offset, index) => {
 
 let locate = (heights, offset) => {
   locateFrom(heights, if (offset < 0) { 0 } else { offset }, 0)
+};
+
+-- Axis-independent viewport state. Extents are columns for tabs and rows for
+-- feed cards; overlap accounts for shared card borders without special policy.
+record Strip = {
+  extents: List<Number>,
+  viewport: Number,
+  overlap: Number,
+};
+record Motion = { position: Number, target: Number };
+
+let rec itemOffset = match(extents, count, overlap) => {
+  (_, 0, _) => { 0 },
+  ([], _, _) => { 0 },
+  ([extent, ..tail], _, _) => {
+    let stride = if (extent > overlap) { extent - overlap } else { 0 };
+    stride + itemOffset(tail, count - 1, overlap)
+  },
+};
+let rec contentExtent = match(extents, overlap) => {
+  ([], _) => { 0 },
+  ([extent], _) => { extent },
+  ([extent, ..tail], _) => {
+    (if (extent > overlap) { extent - overlap } else { 0 }) + contentExtent(tail, overlap)
+  },
+};
+let limit = (strip: Strip, offset) => {
+  let maximum = contentExtent(strip.extents, strip.overlap) - strip.viewport;
+  let safeMaximum = if (maximum > 0) { maximum } else { 0 };
+  if (offset < 0 || strip.viewport <= 0) { 0 } else {
+    if (offset > safeMaximum) { safeMaximum } else { offset }
+  }
+};
+-- Keep the previous viewport whenever possible. Reveal only the obscured edge
+-- of the selected item instead of rebuilding a window from the list's origin.
+let reveal = (strip: Strip, selected, previousTarget) => {
+  let current = limit(strip, previousTarget);
+  match(List.at(strip.extents, selected)) {
+    None => { current },
+    Some(extent) => {
+      let start = itemOffset(strip.extents, selected, strip.overlap);
+      if (start < current || extent >= strip.viewport) { limit(strip, start) } else {
+        if (start + extent > current + strip.viewport) {
+          limit(strip, start + extent - strip.viewport)
+        } else { current }
+      }
+    },
+  }
+};
+let retarget = (strip: Strip, motion: Motion, selected) => {
+  Motion(limit(strip, motion.position), reveal(strip, selected, motion.target))
+};
+let frame = (motion: Motion, animate, advanceFrame) => {
+  Motion(
+    if (!animate) { motion.target } else {
+      if (advanceFrame) { approach(motion.position, motion.target) } else { motion.position }
+    },
+    motion.target,
+  )
+};
+let locateAxis = (strip: Strip, offset) => {
+  let rec find = match(extents, remaining, index) => {
+    ([], _, _) => { Viewport(index, 0) },
+    ([extent, ..tail], _, _) => {
+      let stride = if (extent > strip.overlap) { extent - strip.overlap } else { 0 };
+      if (remaining < stride) { Viewport(index, remaining) } else {
+        find(tail, remaining - stride, index + 1)
+      }
+    },
+  };
+  find(strip.extents, limit(strip, offset), 0)
+};
+-- Both axes share a short, regular clock. There is no long final-frame pause.
+let frameTimes = {
+  let rec times = (index) => {
+    if (index > 16) { [] } else { [index * 16, ..times(index + 1)] }
+  };
+  times(1)
 };

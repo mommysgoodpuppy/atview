@@ -13,7 +13,8 @@ from "../tui/image.wm" import * as Image;
 from "../tui/reactive.wm" import * as Reactive;
 from "../tui/runtime.wm" import * as Runtime;
 from "../tui/surface.wm" import * as Surface;
-from "./data.wm" import { feedMediaPlan, uiFeedsPending };
+from "../tui/scroll.wm" import * as Scroll;
+from "./data.wm" import { uiFeedsPending };
 from "./graph.wm" import { buildPrefetchPlan, scheduleThreadPrefetch };
 from "./model.wm" import {
   RenderDependency,
@@ -24,7 +25,10 @@ from "./model.wm" import {
   UiState,
 };
 from "./render.wm" import * as Render;
-from "./update.wm" import { scheduleMedia, updateState };
+from "./tabs.wm" import * as Tabs;
+from "./preload.wm" import * as Preload;
+from "../tui/reachability.wm" import * as Reach;
+from "./update.wm" import { updateState };
 
 let startFeeds = (feeds: UiFeeds) => {
   let initial = UiState(
@@ -43,13 +47,13 @@ let startFeeds = (feeds: UiFeeds) => {
     0,
   );
   let plan = buildPrefetchPlan(initial);
-  let media = feedMediaPlan(plan.state);
-  -- Media is fetched after the first frame, not before it.
-  let startupTasks = List.append(plan.tasks, media.tasks);
-  let started = Runtime.runRetainedManaged(
-    media.state,
+  -- Preparation runs with actual terminal geometry before the first paint.
+  let startupTasks = [Tabs.discover(plan.state), ..plan.tasks];
+  let started = Runtime.runRetainedManagedPrepared(
+    plan.state,
     startupTasks,
-    (state: UiState) => { scheduleMedia(scheduleThreadPrefetch(state)) },
+    (state: UiState) => { scheduleThreadPrefetch(state) },
+    Preload.prepare,
     (key, state: UiState) => { updateState(key, state) },
     (previous, state: UiState, size: Geometry.Size) => {
       Render.render(previous, state, size)

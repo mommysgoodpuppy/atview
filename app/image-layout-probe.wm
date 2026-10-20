@@ -1,0 +1,92 @@
+-- Aspect-sized media must leave no fixed-height letterbox in either pane.
+from "./model.wm" import *;
+from "./feed-view.wm" import * as Feed;
+from "./thread-view.wm" import * as Thread;
+from "./render.wm" import * as Render;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/surface.wm" import * as Surface;
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../tui/element.wm" import * as Ui;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/kitty.wm" import * as Kitty;
+from "../tui/resource.wm" import * as Resource;
+
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let rec imageArea = match(element, identifier) => {
+  (Ui.ImageViewport(id, area, _, _, _), _) => { if (id == identifier) { Some(area) } else { None } },
+  (Ui.Image(id, area, _, _), _) => { if (id == identifier) { Some(area) } else { None } },
+  (Ui.Fragment(children), _) => {
+    let rec find = match(elements) => {
+      [] => { None },
+      [head, ..tail] => {
+        match(imageArea(head, identifier)) { None => { find(tail) }, Some(area) => { Some(area) } }
+      },
+    };
+    find(children)
+  },
+  (_, _) => { None },
+};
+let rec metricsArea = match(element) => {
+  Ui.Text(area, value, _) => {
+    if (value :> .includes(" likes") :> Result.withDefault(false)) { Some(area) } else { None }
+  },
+  Ui.Fragment(children) => {
+    let rec find = match(elements) => {
+      [] => { None },
+      [head, ..tail] => { match(metricsArea(head)) { None => { find(tail) }, Some(area) => { Some(area) } } },
+    };
+    find(children)
+  },
+  _ => { None },
+};
+let main = () => {
+  let size = Geometry.Size(160, 50, 8, 16);
+  let wide = Image.Image("", "wide", 2000, 500, None);
+  let tall = Image.Image("", "tall", 500, 2000, None);
+  expect(Image.fitRows(40, 14, size, wide) == 5, "wide image must use its physical aspect height");
+  expect(Image.fitRows(41, 14, size, wide) == 6, "fractional rows must round up");
+  expect(Image.fitRows(40, 14, size, tall) == 14, "portrait height must stay capped");
+  expect(Image.fitRows(40, 14, Geometry.Size(160, 50, 16, 16), wide) == 10, "measurement must use terminal cell dimensions");
+  expect(Image.fitRows(40, 14, Geometry.Size(160, 50, 1, 2), wide) == 5, "default cell ratio must measure consistently");
+  expect(Image.fitRows(0, 14, size, wide) == 0 && Image.fitRows(40, 0, size, wide) == 0, "empty areas must reserve no rows");
+  let post = FeedPost("wide", "body", "today", "test.example", "Test", None, None, None, Some(Views.PostImage("", "", "wide", Some(Views.AspectRatio(2000, 500)))), None, "test-cid", None);
+  let item = UiPost(post, Resource.Ready(Some(wide)), Resource.Ready(None));
+  expect(Feed.imageRows(40, 14, size, Image.Fit, item) == 5, "loaded image resource must determine media height");
+  expect(Feed.imageRows(40, 14, size, Image.Fill, item) == 14, "crop-to-fill must keep its requested frame");
+  expect(Feed.imageRows(40, 14, size, Image.Fit, .{ ..item, image = Resource.Failed("offline") }) == 0, "failed images must not leave an empty media frame");
+  let height = Feed.cardHeight(42, size, Image.Fit, item);
+  expect(height == 10, "wide-image feed card must shrink to text plus actual media height");
+  let card = Feed.card(Geometry.rect(0, 0, 42, height), item, size, Image.Fit, false, 1000, true);
+  let media = imageArea(card, 100000) :> Option.withDefault(Geometry.rect(0, 0, 0, 0));
+  let metrics = metricsArea(card) :> Option.withDefault(Geometry.rect(0, 0, 0, 0));
+  expect(media.y == 3 && media.height == 5, "feed media must begin directly after text");
+  expect(metrics.y == media.y + media.height, "feed metrics must follow the image without empty rows");
+  let placed = Kitty.fitPlacement(media, size, wide);
+  expect(placed.offsetY == 0 && placed.rows == media.height, "compact fit placement must have no vertical letterbox");
+  let hidden = Feed.card(Geometry.rect(0, 0, 42, height), item, size, Image.Fit, false, 1000, false);
+  expect(imageArea(hidden, 100000) == None, "scrolling may hide pixels without hiding dimensions");
+  let state = UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", [item], [], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+  let movingPosts = postsForState(.{ ..state, scrolling = true });
+  let movingItem = List.at(movingPosts, 0) :> Option.withDefault(item);
+  expect(Feed.cardHeight(42, size, Image.Fit, movingItem) == height, "scrolling must preserve measured image height");
+  let pane = Thread.threadPane(Geometry.rect(0, 0, 82, 40), state, size);
+  let detailMedia = imageArea(pane, 1) :> Option.withDefault(Geometry.rect(0, 0, 0, 0));
+  let detailMetrics = metricsArea(pane) :> Option.withDefault(Geometry.rect(0, 0, 0, 0));
+  expect(detailMedia.y == 3 && detailMedia.height == 10, "detail pane must use its own width to measure image height");
+  expect(detailMetrics.y == detailMedia.y + detailMedia.height, "detail metrics must follow actual image height");
+  let movingPane = Thread.threadPane(Geometry.rect(0, 0, 82, 40), .{ ..state, scrolling = true }, size);
+  expect(imageArea(movingPane, 1) == None, "detail image must remain hidden during real scrolling");
+  expect(metricsArea(movingPane) == metricsArea(pane), "detail layout must stay stable while pixels are hidden");
+  let textPost = .{ ..item, post = .{ ..post, uri = "second", image = None }, image = Resource.Ready(None) };
+  let loading = .{ ..item, image = Resource.Loading };
+  let smallSize = Geometry.Size(40, 18, 8, 16);
+  let pendingState = .{ ..state, selected = 1, feeds = makeUiFeeds("test", "did:test", "", [loading, textPost], [], None, None) };
+  let initialFrame = Render.render(None, pendingState, smallSize);
+  expect(Feed.cardHeight(42, size, Image.Fit, loading) == height, "known aspect ratio must reserve the final height before download");
+  let resolvedState = .{ ..pendingState, renderVersion = 1, feeds = makeUiFeeds("test", "did:test", "", [item, textPost], [], None, None) };
+  let resolvedFrame = Render.render(Some(initialFrame.memory), resolvedState, smallSize);
+  expect(resolvedFrame.memory.model.scrollTarget == initialFrame.memory.model.scrollTarget, "known image ratio must prevent viewport shifts on download");
+  print("image layout probe: ok")
+};

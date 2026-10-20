@@ -1,0 +1,121 @@
+-- Offline-only likes: fake repository writes verify mutation and retained UI.
+from "./model.wm" import *;
+from "./likes.wm" import * as Likes;
+from "./reaction-model.wm" import * as Reaction;
+from "./render.wm" import * as Render;
+from "./update.wm" import { loadedState, updateStateBase };
+from "./feed-view.wm" import { metrics };
+from "./graph.wm" import { publishThreadResource };
+from "../proto/likes.wm" import * as Protocol;
+from "../proto/api.wm" import * as Api;
+from "../proto/views.wm" import * as Views;
+from "../proto/xrpc.wm" import { AppError, ConfigFailure };
+from "../tui/command.wm" import * as Command;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/resource.wm" import * as Resource;
+from "../tui/surface.wm" import * as Surface;
+from "../tui/scroll.wm" import * as Scroll;
+from "../tui/event.wm" import * as Event;
+from "../tui/ansi.wm" import * as Ansi;
+from js.global("JSON") import { parse };
+
+record Subject = { uri: String, cid: String };
+record LikeRecord = { subject: Subject, createdAt: String };
+record CreateBody = { repo: String, collection: String, record: LikeRecord };
+record DeleteBody = { repo: String, collection: String, rkey: String };
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let contains = (value: String, text: String) => { value :> .includes(text) :> Result.withDefault(false) };
+let selected = (state: UiState) => {
+  List.at(postsForState(state), state.selected) :> Option.withDefault(UiPost(Api.FeedPost("", "", "", "", "", None, None, None, None, None, "", None), Resource.Ready(None), Resource.Ready(None)))
+};
+let settle = (step) => {
+  match(step) {
+    Command.Spawn(state, task) => { task :> Task.map((patch) => { patch(state) }) },
+    _ => { Panic("expected exactly one asynchronous like request") },
+  }
+};
+let pendingState = (step) => {
+  match(step) {
+    Command.Spawn(state, _) => { state },
+    _ => { Panic("expected asynchronous like request") },
+  }
+};
+let main = () => {
+  let uri = "at://did:author/app.bsky.feed.post/post";
+  let likeUri = "at://did:test/app.bsky.feed.like/like-key";
+  let created = Protocol.createBody("did:test", uri, "post-cid", "2026-10-20T00:00:00.000Z");
+  let body: Result<CreateBody, Js.Error> = parse(created) :> Result.andThen(Json.assert);
+  let record = body :> Result.debug;
+  expect(record.repo == "did:test" && record.collection == "app.bsky.feed.like", "create must target the current account's like collection");
+  expect(record.record.subject.uri == uri && record.record.subject.cid == "post-cid", "like subject must include both URI and CID");
+  let deleted = Protocol.deleteBody("did:test", likeUri) :> Result.debug;
+  let deleteWire: Result<DeleteBody, Js.Error> = parse(deleted) :> Result.andThen(Json.assert);
+  let deletion = deleteWire :> Result.debug;
+  expect(deletion.rkey == "like-key" && deletion.repo == "did:test" && deletion.collection == "app.bsky.feed.like", "unlike must delete the viewer's actual like record");
+  expect(match(Protocol.deleteBody("did:test", "at://did:other/app.bsky.feed.like/other")) { Err(_) => { true }, _ => { false } }, "unlike must reject another account's record");
+  expect(match(Protocol.deleteBody("did:test", "at://did:test/app.bsky.feed.post/post")) { Err(_) => { true }, _ => { false } }, "unlike must reject a different collection");
+  let wire = JSON{ uri: uri, cid: "post-cid", author: JSON{ did: "did:author", handle: "test.example" }, record: JSON{ text: "body", createdAt: "today" }, indexedAt: "today", likeCount: 4, viewer: JSON{ like: likeUri } };
+  let object: Result<Js.Object, Js.Error> = wire :> Json.assert;
+  let projected = object :> Result.andThen(Views.decodePost) :> Result.debug;
+  expect(projected.viewerLike == Some(likeUri), "post decoder must retain existing viewer like URI");
+  let loadedLike = Api.feedPost(projected);
+  expect(loadedLike.cid == "post-cid" && loadedLike.viewerLike == Some(likeUri), "feed projection must preserve CID and existing viewer like");
+  expect(contains(metrics(loadedLike), "❤️ "), "existing likes must show the heart at the front of even narrow metrics");
+  let unliked = .{ ..projected, viewerLike = None };
+  let post = UiPost(Api.feedPost(unliked), Resource.Ready(None), Resource.Ready(None));
+  let feeds = makeUiFeeds("test", "did:test", "fake-jwt", [post, post], [post], None, None);
+  let initial = UiState(0, Timeline, Image.Fit, feeds, false, "", 0, ThreadReady(uri, UiThreadPost(unliked, None, [])), [ThreadNode(uri, ThreadCached(UiThreadPost(unliked, None, [])))], false, 0, 0, 0);
+  let writes = Js.Array.fromList([]: List<String>);
+  let create = (jwt, repo, subject, cid) => {
+    expect(jwt == "fake-jwt" && repo == "did:test" && subject == uri && cid == "post-cid", "toggle must send the selected subject and session");
+    let _ = writes :> .push("create");
+    Task.succeed(likeUri)
+  };
+  let remove = (jwt, repo, recordUri) => {
+    expect(jwt == "fake-jwt" && repo == "did:test" && recordUri == likeUri, "unlike must use the confirmed record URI");
+    let _ = writes :> .push("delete");
+    Task.succeed(void)
+  };
+  let operation = Likes.toggleWith(initial, create, remove);
+  let pending = pendingState(operation);
+  expect(selectedLikePending(pending), "pending toggle must expose a saving state");
+  expect(!contains(metrics(post.post), "❤️"), "unconfirmed likes must not show a success heart");
+  match(Likes.toggleWith(pending, create, remove)) {
+    Command.Continue(_) => { void },
+    _ => { Panic("repeat L while saving must not duplicate a repository write") },
+  };
+  expect(Js.Array.toList(writes) == ["create"], "only one create request may be in flight per post");
+  let size = Geometry.Size(160, 50, 8, 16);
+  let initialFrame = Render.render(None, initial, size);
+  settle(operation) :> Task.andThen((liked) => {
+    let likedPost = selected(liked);
+    expect(likedPost.post.viewerLike == Some(likeUri) && likedPost.post.likeCount == Some(5), "successful like must publish URI and increment count once");
+    expect(!selectedLikePending(liked) && contains(metrics(likedPost.post), "❤️"), "successful like must display a heart");
+    expect(List.all(postsFor(liked.feeds, OwnPosts), (copy) => { copy.post.viewerLike == Some(likeUri) }), "like must update copies in other tabs");
+    expect(List.all(postsFor(liked.feeds, Timeline), (copy) => { copy.post.likeCount == Some(5) }), "like must update repeated occurrences without incrementing twice");
+    let frame = Render.render(Some(initialFrame.memory), liked, size);
+    expect(contains(frame.output, "❤️"), "retained reaction update must paint the heart");
+    expect(!contains(frame.output, Ansi.clear) && !contains(frame.output, "a=d") && !contains(frame.output, "a=T"), "reaction update must preserve feed images");
+    let latePage = loadedState(liked, OwnPosts, Api.FeedPage([], None), [post]);
+    expect(List.all(postsFor(latePage.feeds, OwnPosts), (copy) => { copy.post.viewerLike == Some(likeUri) }), "late stale feed results must preserve the confirmed like");
+    let lateThread = publishThreadResource(liked, uri, ThreadCached(UiThreadPost(unliked, None, [])));
+    expect(match(lateThread.thread) { ThreadReady(_, UiThreadPost(root, _, _)) => { root.viewerLike == Some(likeUri) }, _ => { false } }, "late thread results must preserve confirmed reactions");
+    settle(Likes.toggleWith(liked, create, remove)) :> Task.andThen((unlikedState) => {
+      let current = selected(unlikedState);
+      expect(current.post.viewerLike == None && current.post.likeCount == Some(4), "unlike must clear the heart and decrement once");
+      let unlikedFrame = Render.render(Some(frame.memory), unlikedState, size);
+      expect(!contains(unlikedFrame.output, "❤️") && !contains(unlikedFrame.output, Ansi.clear) && !contains(unlikedFrame.output, "a=d"), "unlike must clear reaction text without clearing images");
+      expect(!contains(metrics(current.post), "❤️") && Js.Array.toList(writes) == ["create", "delete"], "second toggle must delete rather than create again");
+      let failCreate = (_jwt, _repo, _uri, _cid) => { Task.fail(ConfigFailure("offline")) };
+      settle(Likes.toggleWith(unlikedState, failCreate, remove)) :> Task.map((failed) => {
+        let failedPost = selected(failed);
+        expect(failedPost.post.viewerLike == None && failedPost.post.likeCount == Some(4), "failed write must preserve confirmed reaction/count");
+        expect(!selectedLikePending(failed) && contains(failed.status, "offline"), "failed write must release the guard and display its error");
+        expect(match(updateStateBase(Event.Character("l"), initial)) { Command.Continue(_) => { true }, _ => { false } }, "lowercase l must not write a like");
+        print("likes probe: ok (fake writes only)")
+      })
+    })
+  })
+};

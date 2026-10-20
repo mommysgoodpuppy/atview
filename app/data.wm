@@ -19,7 +19,7 @@ let rec loadPosts = match(posts, remaining) => {
         None => { Task.succeed(None) },
         Some(source) => {
           let typedSource: Views.PostImage = source;
-          Kitty.load(typedSource)
+          Kitty.loadEncoded(typedSource)
             :> Task.map(Some)
             :> Task.recover((_) => { None })
         },
@@ -34,7 +34,7 @@ let rec loadPosts = match(posts, remaining) => {
     let avatarTask = match(feedPost.avatar) {
       None => { Task.succeed(None) },
       Some(url) => {
-        Kitty.loadAvatar(url)
+        Kitty.loadEncodedAvatar(url)
           :> Task.map(Some)
           :> Task.recover((_) => { None })
       },
@@ -54,7 +54,7 @@ let loadUiFeeds = (feeds: AppFeeds) => {
     loadPosts(feeds.timelinePosts, 3),
     loadPosts(feeds.ownPosts, 3)
   | :> Task.map((timelinePosts, ownPosts) => {
-    UiFeeds(
+    makeUiFeeds(
       feeds.handle,
       feeds.did,
       feeds.accessJwt,
@@ -86,7 +86,7 @@ let rec pendingPosts = match(posts) => {
 };
 
 let uiFeedsPending = (feeds: AppFeeds) => {
-  UiFeeds(
+  makeUiFeeds(
     feeds.handle,
     feeds.did,
     feeds.accessJwt,
@@ -97,21 +97,25 @@ let uiFeedsPending = (feeds: AppFeeds) => {
   )
 };
 
+-- An unrelated task may carry an old pending/loading snapshot. Only publish
+-- completed resources, and keep media that has already loaded successfully.
+let mergeMedia = (current, incoming) => {
+  match(current, incoming) {
+    (Resource.Ready(Some(_)), _) => { current },
+    (_, Resource.Pending) => { current },
+    (_, Resource.Loading) => { current },
+    (_, _) => { incoming },
+  }
+};
+
 let rec republishPost = match(posts, uri, image, avatar) => {
   ([], _, _, _) => { [] },
   ([post, ..tail], _, _, _) => {
     let current: UiPost = post;
     if (current.post.uri == uri) {
-      -- Media already present wins, so a later empty result cannot clear it.
-      let nextImage = match(current.image) {
-        Resource.Ready(Some(_)) => { current.image },
-        _ => { image },
-      };
-      let nextAvatar = match(current.avatar) {
-        Resource.Ready(Some(_)) => { current.avatar },
-        _ => { avatar },
-      };
-      [UiPost(current.post, nextImage, nextAvatar), ..tail]
+      let nextImage = mergeMedia(current.image, image);
+      let nextAvatar = mergeMedia(current.avatar, avatar);
+      [UiPost(current.post, nextImage, nextAvatar), ..republishPost(tail, uri, image, avatar)]
     } else {
       [current, ..republishPost(tail, uri, image, avatar)]
     }
@@ -124,18 +128,12 @@ let publishPostMedia = (state: UiState, uri, image, avatar) => {
     state.selected,
     state.view,
     state.imageScale,
-    UiFeeds(
-      feeds.handle,
-      feeds.did,
-      feeds.accessJwt,
-      republishPost(feeds.timelinePosts, uri, image, avatar),
-      republishPost(feeds.ownPosts, uri, image, avatar),
-      feeds.timelineCursor,
-      feeds.ownCursor,
-    ),
+    .{ ..feeds, preloadVersion = feeds.preloadVersion + 1, tabs = feeds.tabs :> List.map((tab) => {
+      .{ ..tab, posts = republishPost(tab.posts, uri, image, avatar) }
+    }) },
     state.loading,
     state.status,
-    state.renderVersion + 1,
+    state.renderVersion + (if (List.find(postsFor(state.feeds, state.view), (post) => { post.post.uri == uri }) != None) { 1 } else { 0 }),
     state.thread,
     state.threadGraph,
     state.scrolling,
@@ -147,26 +145,30 @@ let publishPostMedia = (state: UiState, uri, image, avatar) => {
 
 let postMediaTask = (post: UiPost, wantImage) => {
   let feedPost: FeedPost = post.post;
-  let imageTask = if (wantImage) {
+  let imageTask = if (wantImage && Resource.isPending(post.image)) {
     match(feedPost.image) {
       None => { Task.succeed(Resource.Ready(None)) },
       Some(source) => {
         let typedSource: Views.PostImage = source;
-        Kitty.load(typedSource)
+        Kitty.loadEncoded(typedSource)
           :> Task.map((image) => { Resource.Ready(Some(image)) })
           :> Task.recover((error) => { Resource.Failed(describeError(error)) })
       },
     }
   } else {
-    Task.succeed(Resource.Pending)
+    Task.succeed(post.image)
   };
-  let avatarTask = match(feedPost.avatar) {
-    None => { Task.succeed(Resource.Ready(None)) },
-    Some(url) => {
-      Kitty.loadAvatar(url)
-        :> Task.map((avatar) => { Resource.Ready(Some(avatar)) })
-        :> Task.recover((error) => { Resource.Failed(describeError(error)) })
-    },
+  let avatarTask = if (!Resource.isPending(post.avatar)) {
+    Task.succeed(post.avatar)
+  } else {
+    match(feedPost.avatar) {
+      None => { Task.succeed(Resource.Ready(None)) },
+      Some(url) => {
+        Kitty.loadEncodedAvatar(url)
+          :> Task.map((avatar) => { Resource.Ready(Some(avatar)) })
+          :> Task.recover((error) => { Resource.Failed(describeError(error)) })
+      },
+    }
   };
   Task|
     imageTask,
@@ -192,7 +194,7 @@ let rec markPostMedia = match(posts, uri, wantImage) => {
           if (wantImage) { loading(current.image) } else { current.image },
           loading(current.avatar),
         ),
-        ..tail
+        ..markPostMedia(tail, uri, wantImage)
       ]
     } else {
       [current, ..markPostMedia(tail, uri, wantImage)]
@@ -200,92 +202,64 @@ let rec markPostMedia = match(posts, uri, wantImage) => {
   },
 };
 
+-- Share resources when a later page/tab introduces an already known post.
+let sharedResource = match(current, known) => {
+  (Resource.Pending, _) => { known },
+  _ => { current },
+};
+let sharedPost = (state: UiState, post: UiPost) => {
+  List.foldLeft(state.feeds.tabs, post, (current, tab) => {
+    List.foldLeft(tab.posts, current, (value, known) => {
+      if (known.post.uri != post.post.uri) { value } else {
+        .{ ..value, image = sharedResource(value.image, known.image), avatar = sharedResource(value.avatar, known.avatar) }
+      }
+    })
+  })
+};
 let markMediaLoading = (state: UiState, uri, wantImage) => {
-  let feeds: UiFeeds = state.feeds;
-  let timeline = match(state.view) {
-    Timeline => { markPostMedia(feeds.timelinePosts, uri, wantImage) },
-    OwnPosts => { feeds.timelinePosts },
+  .{ ..state, feeds = .{ ..state.feeds, preloadVersion = state.feeds.preloadVersion + 1, tabs = state.feeds.tabs :> List.map((tab) => {
+    .{ ..tab, posts = markPostMedia(tab.posts, uri, wantImage) }
+  }) } }
+};
+record MediaRequest = { view: FeedView, uri: String, wantImage: Bool };
+let loadingPosts = (state: UiState) => {
+  List.foldLeft(state.feeds.tabs, []: List<String>, (uris, tab) => {
+    List.foldLeft(tab.posts, uris, (known, post) => {
+      let loading = match(post.image, post.avatar) {
+        (Resource.Loading, _) => { true },
+        (_, Resource.Loading) => { true },
+        _ => { false },
+      };
+      if (loading && List.find(known, (uri) => { uri == post.post.uri }) == None) { [post.post.uri, ..known] } else { known }
+    })
+  })
+};
+-- Bound concurrent posts, and re-read after each request to deduplicate shared
+-- URIs across surfaces. Visible requests come first in the caller's ranking.
+let planMediaRequestsWith = (state: UiState, requests, maximum, loadMedia) => {
+  let rec plan = match(remaining, current, slots) => {
+    ([], _, _) => { current },
+    (_, _, 0) => { current },
+    ([request, ..tail], _, _) => {
+      let post = List.find(postsFor(current.state.feeds, request.view), (item) => { item.post.uri == request.uri });
+      match(post) {
+        None => { plan(tail, current, slots) },
+        Some(item) => {
+          let wantImage = request.wantImage && Resource.isPending(item.image);
+          let wantAvatar = Resource.isPending(item.avatar);
+          if (!wantImage && !wantAvatar) { plan(tail, current, slots) } else {
+            let next = markMediaLoading(current.state, request.uri, wantImage);
+            plan(tail, MediaPlan(next, List.append(current.tasks, [loadMedia(item, wantImage)])), slots - 1)
+          }
+        },
+      }
+    },
   };
-  let own = match(state.view) {
-    Timeline => { feeds.ownPosts },
-    OwnPosts => { markPostMedia(feeds.ownPosts, uri, wantImage) },
-  };
-  UiState(
-    state.selected,
-    state.view,
-    state.imageScale,
-    UiFeeds(
-      feeds.handle,
-      feeds.did,
-      feeds.accessJwt,
-      timeline,
-      own,
-      feeds.timelineCursor,
-      feeds.ownCursor,
-    ),
-    state.loading,
-    state.status,
-    state.renderVersion,
-    state.thread,
-    state.threadGraph,
-    state.scrolling,
-    state.scrollVersion,
-    state.scrollFrame,
-    state.scrollRows,
-  )
+  plan(requests, MediaPlan(state, []), Geometry.nonNegative(maximum - List.length(loadingPosts(state))))
 };
 
-let rec planMediaWindow = match(posts, remaining, images, plan) => {
-  ([], _, _, _) => { plan },
-  (_, 0, _, _) => { plan },
-  ([post, ..tail], _, _, _) => {
-    let current: UiPost = post;
-    let feedPost: FeedPost = current.post;
-    let wantImage = images > 0;
-    let imagePending = wantImage && Resource.isPending(current.image);
-    let mediaPending = imagePending || Resource.isPending(current.avatar);
-    let nextImages = match(feedPost.image) {
-      Some(_) => { if (images <= 0) { 0 } else { images - 1 } },
-      None => { images },
-    };
-    let nextPlan = if (mediaPending) {
-      MediaPlan(
-        markMediaLoading(plan.state, feedPost.uri, wantImage),
-        [postMediaTask(current, wantImage), ..plan.tasks],
-      )
-    } else {
-      plan
-    };
-    planMediaWindow(tail, remaining - 1, nextImages, nextPlan)
-  },
-};
-
-let feedMediaPlan = (state: UiState) => {
-  let posts = postsFor(state.feeds, state.view);
-  let start = Geometry.clamp(0, List.length(posts), state.selected - 1);
-  planMediaWindow(
-    List.drop(posts, start),
-    3,
-    2,
-    MediaPlan(state, []),
-  )
-};
-
-let feedMediaTasks = (state: UiState) => {
-  let plan = feedMediaPlan(state);
-  plan.tasks
-};
-
-let apiFeeds = (feeds: UiFeeds) => {
-  AppFeeds(
-    feeds.handle,
-    feeds.did,
-    feeds.accessJwt,
-    [],
-    [],
-    feeds.timelineCursor,
-    feeds.ownCursor,
-  )
+let planMediaRequests = (state, requests, maximum) => {
+  planMediaRequestsWith(state, requests, maximum, postMediaTask)
 };
 
 let withThread = (state: UiState, thread, version) => {
@@ -366,7 +340,7 @@ let rec loadUiThreadNodes = match(nodes) => {
         let avatarTask = match(post.author.avatar) {
           None => { Task.succeed(None) },
           Some(url) => {
-            Kitty.loadAvatar(url)
+            Kitty.loadEncodedAvatar(url)
               :> Task.map(Some)
               :> Task.recover((_) => { None })
           },

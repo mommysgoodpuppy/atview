@@ -12,19 +12,19 @@ from js.global import unsafe {
 let usage = `atview — direct AT Protocol AppView CLI
 
 usage:
-  wm run app/cli.wm -- auth
-  wm run app/cli.wm -- refresh
-  wm run app/cli.wm -- profile <handle-or-did>
-  wm run app/cli.wm -- feed <handle-or-did> [limit]
-  wm run app/cli.wm -- thread <at-uri> [depth]
-  wm run app/cli.wm -- search <query> [limit]
+  atview auth
+  atview refresh
+  atview profile <handle-or-did>
+  atview feed <handle-or-did> [limit]
+  atview thread <at-uri> [depth]
+  atview search <query> [limit]
 
 examples:
-  wm run app/cli.wm -- auth
-  wm run app/cli.wm -- profile atproto.com
-  wm run app/cli.wm -- feed atproto.com 5
-  wm run app/cli.wm -- thread at://did:plc:.../app.bsky.feed.post/... 3
-  wm run app/cli.wm -- search "workman language" 10`;
+  atview auth
+  atview profile atproto.com
+  atview feed atproto.com 5
+  atview thread at://did:plc:.../app.bsky.feed.post/... 3
+  atview search "workman language" 10`;
 
 let optionString = (fallback, value) => {
   value :> Option.withDefault(fallback)
@@ -70,7 +70,7 @@ let renderPosts = (posts) => {
     :> joinBlocks
 };
 
-let renderFeed = (feed) => {
+let renderFeed = (feed: Views.AuthorFeed) => {
   let cursor = match(feed.cursor) {
     Some(value) => { "\n\nnext cursor: " ++ value },
     None => { "" },

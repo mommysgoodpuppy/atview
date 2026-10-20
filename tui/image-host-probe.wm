@@ -1,0 +1,72 @@
+-- Offline worker regressions: nonblocking placement, cancellation, and cache.
+from "./image-host.wm" import * as Host;
+from "./geometry.wm" import * as Geometry;
+from "./image.wm" import * as Image;
+from "./png.wm" import * as Png;
+from "./sixel.wm" import * as Sixel;
+from "./halfblock.wm" import * as HalfBlock;
+from "./terminal-cap.wm" import * as Cap;
+from "./timer.wm" import * as Timer;
+from "./ansi.wm" import * as Ansi;
+from "../bench/clock.wm" import * as Clock;
+from js.module("node:buffer") import { Buffer };
+
+let expect = (condition, label) => {
+  if (condition) { void } else { Host.stop(); Panic(label) }
+};
+let rec waitForImage = (outputs, count, remaining) => {
+  if (List.length(Js.Array.toList(outputs)) >= count) { Task.succeed(void) } else {
+    if (remaining <= 0) { Host.stop(); Panic("image worker timed out") } else {
+      Timer.delay(5) :> Task.andThen((_) => { waitForImage(outputs, count, remaining - 1) })
+    }
+  }
+};
+let reference = (area, size, scale, image) => {
+  match(Cap.renderer) {
+    Cap.SixelRenderer => { Sixel.render(area, size, scale, image) },
+    Cap.HalfBlockRenderer => { HalfBlock.render(area, scale, image) },
+    Cap.KittyRenderer => { Panic("run with ATVIEW_IMAGE_BACKEND=sixel or half") },
+  }
+};
+let main = () => {
+  let outputs = Js.Array.fromList([]: List<String>);
+  Host.start((value) => { let _ = outputs :> .push(value); void });
+  let bytes = Buffer.alloc(256 * 256 * 4, 255) :> Result.debug;
+  let image = Image.Image("", "", 256, 256, Some(Png.Pixels(bytes, 256, 256)));
+  let size = Geometry.Size(160, 50, 8, 16);
+  let large = Geometry.rect(0, 0, 100, 30);
+  let small = Geometry.rect(4, 5, 4, 2);
+  let moved = Geometry.rect(8, 9, 4, 2);
+  let started = Clock.now();
+  let staged = Host.render(1, large, size, Image.Fit, image);
+  let stagingMs = Clock.now() - started;
+  expect(staged == "", "uncached image must be queued instead of synchronously encoded");
+  expect(Js.Array.toList(outputs) == [], "image must not write synchronously");
+  let _ = Host.deleteAll();
+  let _ = Host.render(2, small, size, Image.Fill, image);
+  let _ = Host.render(2, small, size, Image.Fill, image);
+  let _ = Host.render(2, moved, size, Image.Fill, image);
+  waitForImage(outputs, 1, 1000) :> Task.andThen((_) => {
+    let values = Js.Array.toList(outputs);
+    expect(List.length(values) == 1, "obsolete and duplicate image jobs must not paint");
+    let expected = reference(moved, size, Image.Fill, image);
+    let wrapped = Ansi.beginSynchronizedUpdate ++ expected ++ Ansi.reset ++ Ansi.endSynchronizedUpdate;
+    expect(List.at(values, 0) == Some(wrapped), "worker pixels and placement must match synchronous encoder");
+    let cached = Host.render(2, moved, size, Image.Fill, image);
+    expect(cached == expected, "repeated placement must reuse encoded output");
+    if (Cap.renderer == Cap.SixelRenderer) {
+      expect(Host.render(2, small, size, Image.Fill, image) == reference(small, size, Image.Fill, image), "moving a cached raster must not queue an encoding job");
+    } else { void };
+    let encoded = Image.Image("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGP4z8DAAMIM/////w8AH+4F+7C4l8kAAAAASUVORK5CYII=", "", 2, 2, None);
+    expect(Host.render(3, small, size, Image.Fit, encoded) == "", "PNG decoding must also be queued");
+    waitForImage(outputs, 2, 1000) :> Task.map((_) => {
+      let decodedExpected = reference(small, size, Image.Fit, encoded);
+      expect(decodedExpected != "", "PNG fixture must decode");
+      expect(List.at(Js.Array.toList(outputs), 1) == Some(Ansi.beginSynchronizedUpdate ++ decodedExpected ++ Ansi.reset ++ Ansi.endSynchronizedUpdate), "worker must decode encoded PNG bytes correctly");
+      let duplicate = Image.Image(encoded.base64, "same bytes, another record", encoded.width, encoded.height, None);
+      expect(Host.render(4, small, size, Image.Fit, duplicate) == decodedExpected, "short identity keys must preserve sharing between equal encoded image copies");
+      Host.stop();
+      print("image host probe: ok; staging ms: " ++ Text.of(stagingMs))
+    })
+  })
+};

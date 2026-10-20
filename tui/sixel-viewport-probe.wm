@@ -1,0 +1,46 @@
+from "./sixel.wm" import * as Sixel;
+from "./geometry.wm" import * as Geometry;
+from "./image.wm" import * as Image;
+from "./png.wm" import * as Png;
+from js.global("Math") import unsafe { floor: Number -> Number };
+from js.module("node:buffer") import { Buffer };
+let expect = (value, message) => { if (value) { void } else { Panic(message) } };
+let main = () => {
+  let size = Geometry.Size(80, 24, 2, 3);
+  let area = Geometry.rect(2, -1, 5, 6);
+  let viewport = Geometry.rect(3, 1, 3, 3);
+  let target = Sixel.viewportTarget(area, viewport, size, Image.Fill, 10, 18);
+  expect(target.width == 6 && target.height == 9, "clip must use viewport device pixels");
+  expect(target.sourceX == 2 && target.sourceY == 6, "clip must advance the source origin instead of rescaling");
+  expect(target.sourceWidth == 6 && target.sourceHeight == 9, "clip must preserve original scale");
+  expect(area.x + target.offsetX == 3 && area.y + target.offsetY == 1, "placement must begin at clipped viewport origin");
+  let bytes = Buffer.alloc(10 * 18 * 4, 255) :> Result.debug;
+  let rec fill = (row) => {
+    if (row >= 18) { void } else {
+      let rec columns = (x) => {
+        if (x >= 10) { void } else {
+          let _ = Png.writeByte(bytes, (row * 10 + x) * 4, row * 14);
+          let _ = Png.writeByte(bytes, (row * 10 + x) * 4 + 1, x * 25);
+          columns(x + 1)
+        }
+      };
+      columns(0); fill(row + 1)
+    }
+  };
+  fill(0);
+  let pixels = Png.Pixels(bytes, 10, 18);
+  let original = Sixel.buildIndexed(pixels, Sixel.placement(area, size, Image.Fill, pixels)) :> Option.withDefault(bytes);
+  let cropped = Sixel.buildIndexed(pixels, target) :> Option.withDefault(bytes);
+  let rec check = (index) => {
+    if (index >= 54) { void } else {
+      let y = floor(index / 6);
+      let x = index - y * 6;
+      expect(Png.byte(cropped, index) == Png.byte(original, (y + 6) * 10 + x + 2), "clipped pixels must equal the corresponding full-raster pixels");
+      check(index + 1)
+    }
+  };
+  check(0);
+  let outside = Sixel.viewportTarget(area, Geometry.rect(20, 20, 2, 2), size, Image.Fit, 10, 18);
+  expect(outside.width == 0 && outside.height == 0, "offscreen image must have no raster");
+  print("sixel viewport probe: ok")
+};

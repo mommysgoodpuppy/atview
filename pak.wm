@@ -1,0 +1,41 @@
+-- Atview: AT Protocol terminal client, from its own repository snapshot.
+
+from "pakman/model.wm" import *;
+from "pakman/package.wm" import { serve };
+from "pakman/repository.wm" import * as Repository;
+
+let make = (version, _) => {
+  let wm = package("wm", "~0.4.2");
+  let builder = BuildCommand(.{
+        program = file(wm, ".local/bin/wm"),
+        arguments = ["compile", "app/main.wm", "--executable", "-o", "atview"],
+        source = "atview.tar",
+        strip = 1,
+        output = "atview",
+        dest = ".local/bin/atview",
+        mode = Exec
+      });
+  .{
+    version,
+    sources = [Repository.source("atview.tar")],
+    install = [builder],
+    requires = []
+  }: Package
+};
+
+let definition: Definition = .{
+  name = "atview",
+  description = "AT Protocol terminal client written in Workman",
+  homepage = "https://github.com/mommysgoodpuppy/atview",
+  license = "unspecified",
+  target = Host,
+  scope = User,
+  versions = Repository.versions,
+  hosts = [],
+  -- This development package follows the selected source snapshot. WM and
+  -- Deno retain their release age policies independently.
+  policy = .{ ..defaultPolicy, channel = "source", minAgeDays = 0 },
+  make
+};
+
+let main = () => { serve(definition) };

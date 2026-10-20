@@ -1,0 +1,71 @@
+-- Like records are written only when the user invokes the toggle action.
+from "./xrpc.wm" import * as Xrpc;
+from js.global import { fetch, Date };
+from js.global("JSON") import unsafe { stringify: Js.Value -> String } as JSON;
+record Created = { uri: String };
+
+let createBody = (repo, uri, cid, createdAt) => {
+  JSON.stringify(JSON{
+    repo: repo, collection: "app.bsky.feed.like",
+    record: JSON{ "$type": "app.bsky.feed.like", subject: JSON{ uri: uri, cid: cid }, createdAt: createdAt },
+  })
+};
+let likeKey = (repo: String, uri: String) => {
+  let parts = uri :> .split("/") :> Result.map(Js.Array.toList) :> Result.mapErr(Xrpc.JavaScriptFailure);
+  parts :> Result.andThen((values) => {
+    match(values) {
+      ["at:", "", owner, "app.bsky.feed.like", key] => {
+        if (owner == repo && key != "") { Ok(key) } else { Err(Xrpc.ConfigFailure("like record does not belong to this account")) }
+      },
+      _ => { Err(Xrpc.ConfigFailure("invalid like record URI")) },
+    }
+  })
+};
+let deleteBody = (repo, uri) => {
+  likeKey(repo, uri) :> Result.map((key) => {
+    JSON.stringify(JSON{ repo: repo, collection: "app.bsky.feed.like", rkey: key })
+  })
+};
+let sendOn = (base, jwt, method, body, expectsRecord) => {
+  fetch(base ++ "/xrpc/" ++ method, JSON{
+    method: "POST",
+    headers: JSON{ "Authorization": "Bearer " ++ jwt, "Content-Type": "application/json" },
+    body: body,
+  }) :> Task.mapErr(Xrpc.JavaScriptFailure) :> Task.andThen((response) => {
+    let status = Result|response.ok, response.status| :> Result.mapErr(Xrpc.JavaScriptFailure);
+    status :> Task.fromResult :> Task.andThen((ok, code) => {
+      if (!ok) {
+        response :> .text() :> Task.mapErr(Xrpc.JavaScriptFailure) :> Task.andThen((message) => {
+          Task.fail(Xrpc.HttpFailure(code, message))
+        })
+      } else {
+        if (expectsRecord) {
+          response :> .json() :> Task.mapErr(Xrpc.JavaScriptFailure) :> Task.andThen((raw) => {
+            let created: Result<Created, Js.Error> = raw :> Json.assert;
+            created :> Result.map((value) => { Some(value.uri) })
+              :> Result.mapErr(Xrpc.ResponseShapeFailure) :> Task.fromResult
+          })
+        } else { Task.succeed(None) }
+      }
+    })
+  })
+};
+let createOn = (base, jwt, repo, uri, cid) => {
+  Date.new() :> Result.andThen((date) => { date :> .toISOString() })
+    :> Result.mapErr(Xrpc.JavaScriptFailure) :> Task.fromResult :> Task.andThen((createdAt) => {
+      sendOn(base, jwt, "com.atproto.repo.createRecord", createBody(repo, uri, cid, createdAt), true)
+    }) :> Task.andThen((record) => {
+      match(record) {
+        None => { Task.fail(Xrpc.ConfigFailure("like response omitted its record URI")) },
+        Some(value) => { likeKey(repo, value) :> Result.map((_) => { value }) :> Task.fromResult },
+      }
+    })
+};
+let removeOn = (base, jwt, repo, uri) => {
+  deleteBody(repo, uri) :> Task.fromResult :> Task.andThen((body) => {
+    sendOn(base, jwt, "com.atproto.repo.deleteRecord", body, false) :> Task.map((_) => { void })
+  })
+};
+
+let create = (jwt, repo, uri, cid) => { createOn("https://bsky.social", jwt, repo, uri, cid) };
+let remove = (jwt, repo, uri) => { removeOn("https://bsky.social", jwt, repo, uri) };

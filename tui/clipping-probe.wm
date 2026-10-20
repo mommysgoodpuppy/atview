@@ -1,0 +1,46 @@
+-- Offline viewport regressions shared by immediate, declarative, and retained UI.
+from "./ansi.wm" import * as Ansi;
+from "./draw.wm" import * as Draw;
+from "./element.wm" import * as Ui;
+from "./geometry.wm" import * as Geometry;
+from "./surface.wm" import * as Surface;
+from "./tabs.wm" import * as Tabs;
+
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let contains = (value: String, text: String) => {
+  value :> .includes(text) :> Result.withDefault(false)
+};
+let main = () => {
+  expect(Draw.textSlice("abcdef", 0, 4, "..") == "ab..", "right overflow must preserve text and indicate continuation");
+  expect(Draw.textSlice("abcdef", 0, 6, "..") == "abcdef", "exact fit must not add a marker");
+  expect(Draw.textSlice("abcdef", 0, 1, "..") == ".", "one column must stay inside its viewport");
+  expect(Draw.textSlice("abcdef", 0, 0, "..") == "", "zero-width text must be empty");
+  expect(Draw.textSlice("abcdef", 2, 3, "") == "cde", "hard clipping must respect source offset");
+  expect(Draw.textSlice("abcdefghijk", 2, 6, "..") == "..ef..", "both clipped edges must show continuation");
+  expect(Draw.textSlice("abc", 3, 4, "..") == "", "viewport beyond source must be empty");
+  let viewport = Geometry.rect(5, 4, 4, 2);
+  let area = Geometry.rect(3, 3, 12, 4);
+  expect(Geometry.intersect(area, viewport) == viewport, "intersection must clip all four edges");
+  let outside = Geometry.intersect(area, Geometry.rect(30, 30, 2, 2));
+  expect(outside.width == 0 && outside.height == 0, "disjoint rectangles must have no visible area");
+  let textArea = Geometry.rect(3, 4, 12, 1);
+  let clipped = Draw.textViewport(textArea, viewport, "abcdefghijk", "", Draw.plain);
+  expect(clipped == Draw.at(5, 4, "cdef", Draw.plain), "partial text must draw at the intersection with correct source offset");
+  expect(Draw.textViewport(Geometry.rect(3, 3, 12, 1), viewport, "hidden", "..", Draw.plain) == "", "vertically hidden text must emit no commands");
+  let values = ["hidden", "abcdefghijk", "ABCDEFGHIJK", "bottom-hidden"];
+  let multiline = Draw.linesViewport(area, viewport, values, "", Draw.plain);
+  expect(multiline == Draw.at(5, 4, "cdef", Draw.plain) ++ Draw.at(5, 5, "CDEF", Draw.plain), "partial lines must clip rows and columns without reflowing");
+  let terminal = Geometry.Size(80, 24, 8, 16);
+  expect(Ui.render(terminal, Ui.textViewport(textArea, viewport, "abcdefghijk", "", Draw.plain)) == clipped, "declarative text clipping must match immediate drawing");
+  expect(Ui.render(terminal, Ui.linesViewport(area, viewport, values, "", Draw.plain)) == multiline, "declarative line clipping must match immediate drawing");
+  expect(Surface.encode([Surface.TextViewport(textArea, viewport, "abcdefghijk", "", Draw.plain)], terminal) == clipped, "retained text viewport command must match");
+  expect(Surface.encode([Surface.LinesViewport(area, viewport, values, "", Draw.plain)], terminal) == multiline, "retained lines viewport command must match");
+  let tabs = Tabs.render(Geometry.rect(0, 0, 30, 1), ["One", "Two", "LongFeedNameHere"], 0);
+  expect(contains(tabs, " LongFeedN.."), "last tab must use the remaining space with a continuation marker");
+  expect(!contains(tabs, Ansi.cursorTo(1, 27) ++ Draw.styleCode(Draw.muted) ++ " LongFeed"), "partial tab must not overwrite navigation controls");
+  let (start, count) = Tabs.window(30, ["One", "Two", "LongFeedNameHere"], 0);
+  expect(start == 0 && count == 3, "tab window must include a partly visible final tab");
+  let narrow = Tabs.render(Geometry.rect(0, 0, 8, 1), ["LongFeedNameHere"], 0);
+  expect(contains(narrow, "LongFe.."), "compact tab strip must also indicate clipped labels");
+  print("clipping probe: ok")
+};

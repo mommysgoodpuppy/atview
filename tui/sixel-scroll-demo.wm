@@ -1,0 +1,50 @@
+-- Manual emulator diagnostic: draw sixel once, then send only scroll commands.
+from "./ansi.wm" import * as Ansi;
+from "./command.wm" import * as Command;
+from "./draw.wm" import * as Draw;
+from "./event.wm" import * as Event;
+from "./geometry.wm" import * as Geometry;
+from "./runtime.wm" import * as Runtime;
+from "./surface.wm" import * as Surface;
+from "./terminal-scroll.wm" import * as Scroll;
+
+from js.global("Math") import unsafe { floor: Number -> Number };
+
+record Memory = { size: Geometry.Size, offset: Number, generation: Number };
+record State = { offset: Number, generation: Number };
+let update = (event, state: State) => {
+  match(event) {
+    Event.Character("q") => { Command.Quit },
+    Event.CtrlC => { Command.Quit },
+    Event.Character("j") => { Command.Continue(.{ ..state, offset = state.offset + 1 }) },
+    Event.Character("k") => { Command.Continue(.{ ..state, offset = state.offset - 1 }) },
+    Event.Character("r") => { Command.Continue(State(0, state.generation + 1)) },
+    _ => { Command.Continue(state) },
+  }
+};
+let render = (previous, state: State, size: Geometry.Size) => {
+  let width = Geometry.percentOf(size.width, 50);
+  let region = Geometry.rect(0, 2, width, size.height - 4);
+  let repaint = match(previous) {
+    None => { true },
+    Some(old) => { old.size != size || old.generation != state.generation },
+  };
+  let output = if (repaint) {
+    let rec bands = (row) => {
+      if (row >= 16) { "" } else { "#" ++ Text.of(row - 2 * floor(row / 2)) ++ "!72~-" ++ bands(row + 1) }
+    };
+    Draw.beginFrame ++
+      Draw.text(Geometry.rect(0, 0, size.width, 1), "Sixel retained scroll test: j/k scroll, r redraw, q quit", Draw.status) ++
+      Draw.lines(Geometry.rect(14, 4, width - 15, 6), ["TOP", "red / green", "image and text", "must move together", "without image resend", "BOTTOM"], Draw.plain) ++
+      Draw.lines(Geometry.rect(width + 1, 4, size.width - width - 1, 6), ["STATIONARY PANE", "This text must", "stay in place.", "If it moves,", "horizontal margins", "are unsupported."], Draw.plain) ++
+      Ansi.cursorTo(5, 3) ++ Ansi.esc ++ "Pq\"1;1;72;96#0;2;100;0;0#1;2;0;100;0" ++ bands(0) ++ Ansi.esc ++ "\\"
+  } else {
+    match(previous) {
+      None => { "" },
+      Some(old) => { Scroll.rectangle(region, state.offset - old.offset) },
+    }
+  };
+  Surface.frame(Memory(size, state.offset, state.generation), size,
+    [Surface.Raw(Ansi.beginSynchronizedUpdate ++ output ++ Draw.endFrame ++ Ansi.endSynchronizedUpdate)])
+};
+let main = () => { Runtime.runRetained(State(0, 0), update, render) };

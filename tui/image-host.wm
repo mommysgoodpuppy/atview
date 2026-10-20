@@ -1,0 +1,328 @@
+-- Terminal host boundary for asynchronous image encoding. Mutable session
+-- ownership stays here, alongside the worker and terminal output callback;
+-- application state and reactive computations remain immutable.
+from "./ansi.wm" import * as Ansi;
+from "./geometry.wm" import * as Geometry;
+from "./image.wm" import * as Image;
+from "./host-identity.wm" import * as HostIdentity;
+from "./png.wm" import * as Png;
+from js.module("node:buffer") import type { Buffer };
+from "./kitty.wm" import * as Kitty;
+from "./sixel.wm" import * as Sixel;
+from "./halfblock.wm" import * as HalfBlock;
+from "./terminal-cap.wm" import * as Cap;
+from js.worker("./image-worker.wm") import { url } as Artifact;
+from js.global import { Worker };
+from js.global import type { Worker as WorkerHandle };
+from js.global("Reflect") import { get };
+from js.global("Math") import unsafe { ceil: Number -> Number };
+-- Reflect is the opaque storage boundary for the host-owned session slot.
+from js.global("Reflect") import unsafe {
+  get as opaqueGet: (Js.Value, String) -> Js.Value,
+  set as opaqueSet: (Js.Value, String, Js.Value) -> Bool,
+};
+
+let cacheLimit = 256;
+
+record Clip = { firstRow: Number, rowCount: Number, x: Number, y: Number, partial: Bool };
+record Job = {
+  identifier: Number,
+  token: Number,
+  key: String,
+  payload: Js.Value,
+  prefix: String,
+  warm: Bool,
+  clip: Clip,
+};
+record Cached = { key: String, output: String, rows: List<String> };
+record Reply = { token: Number, output: String, rows: Js.Array<String> };
+record Session = {
+  worker: WorkerHandle,
+  emit: String -> Void,
+  nextToken: Number,
+  busy: Option<Job>,
+  queued: List<Job>,
+  warming: List<Job>,
+  wanted: List<Job>,
+  cached: List<Cached>,
+};
+type Host = Disabled | Enabled<Session>;
+let holder = JSON{};
+let read = () => {
+  let stored: Result<Host, Js.Error> = get(holder, "session") :> Result.andThen(Json.assert);
+  stored :> Result.withDefault(Disabled)
+};
+let save = (host) => {
+  let source = Js.Array.fromList([host]);
+  let _ = opaqueSet(holder, "session", opaqueGet(source, "0"));
+  void
+};
+
+let rec withoutId = match(jobs, identifier) => {
+  ([], _) => { [] },
+  ([job, ..tail], _) => {
+    if (job.identifier == identifier) { withoutId(tail, identifier) } else { [job, ..withoutId(tail, identifier)] }
+  },
+};
+let rec wanted = match(jobs, token) => {
+  ([], _) => { false },
+  ([job, ..tail], _) => { job.token == token || wanted(tail, token) },
+};
+let rec lookup: (List<Cached>, String) -> Option<Cached> = match(cache, key) => {
+  ([], _) => { None },
+  ([entry, ..tail], _) => {
+    if (entry.key == key) { Some(entry) } else { lookup(tail, key) }
+  },
+};
+let placed = (prefix, clip: Clip, output, rows) => {
+  if (!clip.partial) { prefix ++ output } else {
+    let visible = List.take(List.drop(rows, clip.firstRow), clip.rowCount);
+    let rec draw = match(remaining, row) => {
+      ([], _) => { "" },
+      ([raster, ..tail], _) => {
+        Ansi.cursorTo(clip.y + row + 1, clip.x + 1) ++ raster ++ draw(tail, row + 1)
+      },
+    };
+    draw(visible, 0)
+  }
+};
+let withoutToken = (jobs, token) => {
+  jobs :> List.filter((job) => { job.token != token })
+};
+let pendingJob = (session: Session, key) => {
+  let jobs = match(session.busy) {
+    None => { List.append(session.queued, session.warming) },
+    Some(job) => { [job, ..List.append(session.queued, session.warming)] },
+  };
+  List.find(jobs, (job) => { job.key == key })
+};
+
+let rec pump = () => {
+  match(read()) {
+    Disabled => { void },
+    Enabled(session) => {
+      match(session.busy) {
+        Some(_) => { void },
+        None => {
+          let work = match(session.queued) {
+            [] => { session.warming },
+            _ => { session.queued },
+          };
+          match(work) {
+            [] => { void },
+            [job, .._] => {
+              let next = .{ ..session,
+                queued = withoutToken(session.queued, job.token),
+                warming = withoutToken(session.warming, job.token) };
+              if (job.warm || wanted(session.wanted, job.token)) {
+                save(Enabled(.{ ..next, busy = Some(job) }));
+                session.worker :> .postMessage(job.payload) :> Result.withDefault(void)
+              } else { save(Enabled(next)); pump() }
+            },
+          }
+        },
+      }
+    },
+  }
+};
+let accept = (reply: Reply) => {
+  match(read()) {
+    Disabled => { void },
+    Enabled(session) => {
+      match(session.busy) {
+        Some(job) => {
+          if (job.token == reply.token) {
+            let rows = Js.Array.toList(reply.rows);
+            let cache = [Cached(job.key, reply.output, rows), ..List.take(session.cached, cacheLimit - 1)];
+            save(Enabled(.{ ..session, busy = None, cached = cache }));
+            let output = List.foldLeft(session.wanted, "", (acc, placement) => {
+              if (placement.token == reply.token) { acc ++ placed(placement.prefix, placement.clip, reply.output, rows) } else { acc }
+            });
+            if (output != "") {
+              session.emit(Ansi.beginSynchronizedUpdate ++ output ++ Ansi.reset ++ Ansi.endSynchronizedUpdate)
+            } else { void };
+            pump()
+          } else { void }
+        },
+        None => { void },
+      }
+    },
+  }
+};
+let start = (write) => {
+  match(Cap.renderer) {
+    Cap.KittyRenderer => { void },
+    _ => {
+      match(Worker.new(Artifact.url, JSON{ "type": "module" })) {
+        Err(_) => { void },
+        Ok(worker) => {
+          save(Enabled(Session(worker, write, 1, None, [], [], [], [])));
+          worker :> .addEventListener("message", (event) => {
+            let reply: Result<Reply, Js.Error> = get(event, "data") :> Result.andThen(Json.assert);
+            reply :> Result.map(accept) :> Result.withDefault(void)
+          }) :> Result.withDefault(void)
+        },
+      }
+    },
+  }
+};
+let stop = () => {
+  match(read()) {
+    Disabled => { void },
+    Enabled(session) => {
+      save(Disabled);
+      session.worker :> .terminate() :> Result.withDefault(void)
+    },
+  }
+};
+let deleteImage = (identifier) => {
+  match(read()) {
+    Disabled => { void },
+    Enabled(session) => {
+      let nextWanted = withoutId(session.wanted, identifier);
+      save(Enabled(.{ ..session, wanted = nextWanted,
+        queued = session.queued :> List.filter((job) => { job.identifier != identifier || wanted(nextWanted, job.token) }) }))
+    },
+  };
+  Kitty.deleteImage(identifier)
+};
+let deleteAll = () => {
+  match(read()) {
+    Disabled => { void },
+    Enabled(session) => { save(Enabled(.{ ..session, wanted = [], queued = [] })) },
+  };
+  Kitty.deleteAll
+};
+
+let stageClipped = (paint, identifier, area: Geometry.Rect, viewport: Geometry.Rect, terminal: Geometry.Size, scale, image: Image.Image) => {
+  let sixel = Cap.renderer == Cap.SixelRenderer;
+  let target = if (Cap.renderer == Cap.HalfBlockRenderer) {
+    HalfBlock.viewportTarget(area, viewport, scale, image.width, image.height)
+  } else { Sixel.viewportTarget(area, viewport, terminal, scale, image.width, image.height) };
+  -- The cache family fixes scale and horizontal clipping, but preserves the
+  -- entire vertical raster. All top/bottom crops reuse its encoded row strips.
+  let familyViewport = Geometry.rect(viewport.x, area.y, viewport.width, area.height);
+  let family = if (Cap.renderer == Cap.HalfBlockRenderer) {
+    HalfBlock.viewportTarget(area, familyViewport, scale, image.width, image.height)
+  } else { Sixel.viewportTarget(area, familyViewport, terminal, scale, image.width, image.height) };
+  let (_, sixelCellHeight) = Sixel.cellPixels(terminal);
+  let cellHeight = if (sixel) { sixelCellHeight } else { 1 };
+  let clip = Clip(target.offsetY - family.offsetY, ceil(target.height / cellHeight),
+    area.x + target.offsetX, area.y + target.offsetY,
+    !sixel || target.offsetY != family.offsetY || target.height != family.height);
+  let prefix = if (Cap.renderer == Cap.SixelRenderer) {
+    Ansi.cursorTo(area.y + target.offsetY + 1, area.x + target.offsetX + 1)
+  } else { "" };
+  let clipped = Geometry.intersect(area, viewport);
+  if (clipped.width <= 0 || clipped.height <= 0 || image.width <= 0 || image.height <= 0) { if (paint) { deleteImage(identifier) } else { "" } } else {
+  match(read(), Cap.renderer) {
+    (_, Cap.KittyRenderer) => {
+      if (paint) { Kitty.renderWithId(identifier, clipped, terminal, scale, image) } else { "ready" }
+    },
+
+    (Disabled, Cap.SixelRenderer) => {
+      if (!paint) { "" } else {
+      let pixels = match(image.pixels) {
+        Some(value) => { Some(value) },
+        None => { match(Png.decode(image.base64)) { Ok(value) => { Some(value) }, Err(_) => { None }, } },
+      };
+      match(pixels) {
+        None => { "" },
+        Some(value) => { Sixel.renderPixels(area, target, value) },
+      }
+      }
+    },
+    (Disabled, Cap.HalfBlockRenderer) => {
+      if (paint) { HalfBlock.render(clipped, scale, image) } else { "" }
+    },
+    (Enabled(session), _) => {
+      let imageSlot = Js.Array.fromList([image]);
+      let object = opaqueGet(imageSlot, "0");
+      let source = if (image.base64 == "") { HostIdentity.key(object) } else { HostIdentity.keyFor(object, image.base64) };
+      let key = `${sixel},${family.width},${family.height},${family.sourceX},${family.sourceY},${family.sourceWidth},${family.sourceHeight},${cellHeight}:${source}`;
+      match(lookup(session.cached, key)) {
+        Some(cached) => {
+          if (paint) {
+            let _ = deleteImage(identifier);
+            placed(prefix, clip, cached.output, cached.rows)
+          } else { "ready" }
+        },
+        None => {
+          if (target.width <= 0 || target.height <= 0) { if (paint) { deleteImage(identifier) } else { "" } } else {
+          match(pendingJob(session, key)) {
+          Some(job) => {
+            if (paint) {
+              let current = .{ ..job, identifier = identifier, prefix = prefix, warm = false, clip = clip };
+              let busy = match(session.busy) { None => { false }, Some(active) => { active.token == job.token }, };
+              let queued = withoutToken(session.queued, job.token);
+              save(Enabled(.{ ..session,
+                wanted = [current, ..withoutId(session.wanted, identifier)],
+                warming = withoutToken(session.warming, job.token),
+                queued = if (busy) { queued } else { [current, ..queued] } }));
+              pump()
+            } else { void };
+            ""
+          },
+          None => {
+            let pixelData = match(image.pixels) {
+              None => { JSON{ width: 0, height: 0, bytes: JSON[] } },
+              Some(raw) => {
+                let pixels: Png.Pixels = raw;
+                JSON{ width: pixels.width, height: pixels.height, bytes: pixels.bytes }
+              },
+            };
+            let payload = JSON{
+              token: session.nextToken, x: clipped.x, y: clipped.y,
+              width: clipped.width, height: clipped.height,
+              cellWidth: terminal.cellWidth, cellHeight: terminal.cellHeight,
+              sixel: Cap.renderer == Cap.SixelRenderer, fill: scale == Image.Fill,
+              base64: image.base64, pixels: pixelData,
+              target: JSON{ offsetX: 0, offsetY: 0, width: family.width, height: family.height,
+                sourceX: family.sourceX, sourceY: family.sourceY,
+                sourceWidth: family.sourceWidth, sourceHeight: family.sourceHeight },
+            };
+            let job = Job(identifier, session.nextToken, key, payload, prefix, !paint, clip);
+            save(Enabled(.{
+              ..session, nextToken = session.nextToken + 1,
+              queued = if (paint) {
+                let remainingWanted = withoutId(session.wanted, identifier);
+                let keep = session.queued :> List.filter((old) => { old.identifier != identifier || wanted(remainingWanted, old.token) });
+                List.append(keep, [job])
+              } else { session.queued },
+              wanted = if (paint) { [job, ..withoutId(session.wanted, identifier)] } else { session.wanted },
+              warming = if (paint) { session.warming } else { List.append(List.take(session.warming, cacheLimit - 1), [job]) },
+            }));
+            pump();
+            ""
+          },
+          }
+          }
+        },
+      }
+    },
+  }
+  }
+};
+let renderClipped = (identifier, area, viewport, terminal, scale, image) => {
+  stageClipped(true, identifier, area, viewport, terminal, scale, image)
+};
+-- Warm encoded output without touching terminal placements. Full-frame clears
+-- cancel paint requests but preserve this cache-only work.
+let preloadClipped = (area, viewport, terminal, scale, image) => {
+  stageClipped(false, -1, area, viewport, terminal, scale, image) != ""
+};
+let render = (identifier, area, terminal, scale, image) => {
+  renderClipped(identifier, area, area, terminal, scale, image)
+};
+
+let isIdle = () => {
+  match(read()) {
+    Disabled => { true },
+    Enabled(session) => {
+      match(session.busy) {
+        Some(_) => { false },
+        None => { List.length(session.queued) == 0 && List.length(session.warming) == 0 },
+      }
+    },
+  }
+};

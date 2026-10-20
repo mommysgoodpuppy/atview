@@ -1,0 +1,99 @@
+-- Offline tab discovery, navigation, page isolation, and layout regressions.
+from "./model.wm" import *;
+from "./tabs.wm" import { addTabs };
+from "./update.wm" import { switchTabState, loadedState, failedPage, updateState };
+from "./render.wm" import * as Render;
+from "./view.wm" import { renderTabs };
+from "../proto/feed-tabs.wm" import * as Saved;
+from "../proto/api.wm" import { FeedPage, FeedPost };
+from "../tui/command.wm" import * as Command;
+from "../tui/event.wm" import * as Event;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/resource.wm" import * as Resource;
+from "../tui/surface.wm" import * as Surface;
+from "../tui/tabs.wm" import * as TabBar;
+from "../tui/scroll.wm" import * as Scroll;
+
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let unwrap = (result) => { result :> Result.debug };
+let decode = (body) => {
+  let object: Result<Js.Object, Js.Error> = body :> Json.assert;
+  object :> Result.andThen(Saved.decodePreferences)
+};
+let stateOf = (step) => {
+  match(Command.settleStep(step)) {
+    Command.Settled(state, tasks) => {
+      expect(List.length(tasks) == List.length(Scroll.frameTimes), "cached tab switches must schedule only animation frames");
+      state
+    },
+    Command.SettledQuit => { Panic("unexpected quit") },
+  }
+};
+let fixture = (uri) => {
+  UiPost(FeedPost(uri, "body", "today", "test.example", "Test", None, None, None, None, None, "test-cid", None), Resource.Ready(None), Resource.Ready(None))
+};
+let main = () => {
+  let decoded = decode(JSON{ preferences: JSON[
+    JSON{ "$type": "app.bsky.actor.defs#savedFeedsPref", pinned: JSON["old"], saved: JSON[] },
+    JSON{ "$type": "app.bsky.actor.defs#savedFeedsPrefV2", items: JSON[
+      JSON{ "type": "timeline", value: "following", pinned: true },
+      JSON{ "type": "feed", value: "at://did:test/app.bsky.feed.generator/a", pinned: true },
+      JSON{ "type": "feed", value: "at://did:test/app.bsky.feed.generator/a", pinned: true },
+      JSON{ "type": "feed", value: "hidden", pinned: false },
+      JSON{ "type": "list", value: "at://did:test/app.bsky.graph.list/b", pinned: true },
+      JSON{ "type": "future-kind", value: "ignored", pinned: true },
+    ] },
+  ] }) :> unwrap;
+  expect(List.length(decoded) == 2, "prefer V2; retain only unique pinned feeds and lists");
+  let legacy = decode(JSON{ preferences: JSON[
+    JSON{ "$type": "app.bsky.actor.defs#savedFeedsPref", pinned: JSON["at://did:test/app.bsky.graph.list/old"], saved: JSON[] },
+  ] }) :> unwrap;
+  expect(legacy == [Saved.SavedFeed("list", "at://did:test/app.bsky.graph.list/old", "old")], "decode legacy pinned lists");
+  let empty = decode(JSON{ preferences: JSON[] }) :> unwrap;
+  expect(empty == [], "missing preferences must keep built-in tabs");
+  let initial = UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", [], [], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+  expect((move(0, 1, initial)) == initial, "moving in an empty loading feed must not create a negative selection");
+  let added = addTabs(initial, decoded);
+  expect(List.length(added.feeds.tabs) == 4, "discover saved feed tabs");
+  let addedAgain = addTabs(added, decoded);
+  expect(List.length(addedAgain.feeds.tabs) == 4, "discovery must not duplicate tabs");
+  let loadedFeeds = .{ ..added.feeds, tabs = added.feeds.tabs :> List.map((tab) => { .{ ..tab, loaded = true } }) };
+  let cached = .{ ..added, feeds = loadedFeeds };
+  let right = updateState(Event.Character("i"), cached) :> stateOf;
+  expect(sameView(right.view, OwnPosts), "i must move to next tab");
+  let left = updateState(Event.Character("u"), cached) :> stateOf;
+  expect(sameView(left.view, ListTimeline("at://did:test/app.bsky.graph.list/b")), "u must wrap to final tab");
+  let wrapped = updateState(Event.Character("i"), left) :> stateOf;
+  expect(sameView(wrapped.view, Timeline), "i must wrap to first tab");
+  let away = switchTabState(.{ ..cached, selected = 3, scrollRows = 12, scrolling = true }, OwnPosts);
+  let back = switchTabState(away, Timeline);
+  expect(back.selected == 3 && back.scrollRows == 12, "restore per-tab navigation");
+  expect(!away.scrolling && away.scrollVersion > cached.scrollVersion, "tab switches must cancel old scroll timers");
+  let target = GeneratorFeed("at://did:test/app.bsky.feed.generator/a");
+  let pending = .{ ..cached, feeds = modifyTab(cached.feeds, target, (tab) => { .{ ..tab, loading = true } }) };
+  let arrived = loadedState(pending, target, FeedPage([], Some("next")), [fixture("saved-post")]);
+  expect(List.length(postsFor(arrived.feeds, target)) == 1, "page must populate its requested feed");
+  expect(postsFor(arrived.feeds, Timeline) == [], "inactive page must not leak into active timeline");
+  expect(!arrived.loading && arrived.status == "", "inactive completion must preserve active loading/status");
+  let next = loadedState(arrived, target, FeedPage([], None), [fixture("next-post")]);
+  expect(List.length(postsFor(next.feeds, target)) == 2, "cursor pages must append");
+  let tab = tabValue(next.feeds, target);
+  expect(tab.cursor == None && tab.loaded && !tab.loading, "completed page state must belong to its tab");
+  let failed = failedPage(pending, target, "offline");
+  let failedTab = tabValue(failed.feeds, target);
+  expect(failedTab.status == "offline" && !failedTab.loading && failed.status == "", "inactive errors must remain in their own tab");
+  let (start, slots) = TabBar.window(40, ["one", "two", "three", "four", "five", "six", "seven", "eight"], 7);
+  expect(start <= 7 && start + slots > 7, "narrow tab strip must keep active tab visible");
+  let (compactStart, compactCount) = TabBar.window(80, ["One", "Two", "Three", "Four", "Five", "Six"], 0);
+  expect(compactStart == 0 && compactCount == 6, "short tab labels must fit without fixed-width gaps");
+  expect(TabBar.tabWidth("One", 72) == 5, "tab width must follow label length");
+  let bar = renderTabs(cached, Geometry.Size(80, 30, 8, 16));
+  expect(bar :> .includes("[Following]") :> Result.withDefault(false), "tab strip must identify active feed");
+  let size = Geometry.Size(40, 30, 8, 16);
+  let first = Render.render(None, .{ ..cached, scrollRows = 100 }, size);
+  let switched = Render.render(Some(first.memory), switchTabState(.{ ..cached, scrollRows = 100 }, OwnPosts), size);
+  expect(switched.memory.model.scrollTarget == 0, "tab switching must not apply another tab's wheel delta");
+  print("tabs probe: ok")
+};

@@ -1,0 +1,123 @@
+-- Fake image/page work only: no network requests or social writes.
+from "./model.wm" import *;
+from "./preload.wm" import * as Preload;
+from "./data.wm" import * as Data;
+from "./tabs.wm" import * as Tabs;
+from "./feed-view.wm" import * as Feed;
+from "./render.wm" import * as Render;
+from "../proto/api.wm" import { FeedPost, FeedPage };
+from "../proto/views.wm" import * as Views;
+from "../proto/xrpc.wm" import { AppError };
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/reachability.wm" import * as Reach;
+from "../tui/resource.wm" import * as Resource;
+from "../tui/image.wm" import * as Image;
+from "../tui/scroll.wm" import * as Scroll;
+from "../tui/surface.wm" import * as Surface;
+from "../tui/reactive.wm" import * as Reactive;
+
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let fixture = (uri) => {
+  let source = Views.PostImage("", "", "wide", Some(Views.AspectRatio(800, 200)));
+  UiPost(FeedPost(uri, "body", "today", "test.example", "Test", None, None, None, Some(source), None, "cid", None), Resource.Pending, Resource.Ready(None))
+};
+let rec fixtures = (prefix, count, index) => {
+  if (index >= count) { [] } else { [fixture(prefix ++ Text.of(index)), ..fixtures(prefix, count, index + 1)] }
+};
+let stateOf = (posts) => {
+  UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", posts, [], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0)
+};
+let fakeMedia = (post: UiPost, _wantImage) => {
+  Task.succeed((state: UiState) => { Data.publishPostMedia(state, post.post.uri, Resource.Ready(Some(Image.Image("", "", 800, 200, None))), post.avatar) })
+};
+let fakePage = (_state: UiState, view) => {
+  let prefix = match(view) { GeneratorFeed(uri) => { uri }, _ => { "neighbor" }, };
+  let post = fixture(prefix);
+  Task.succeed(FeedPage([post.post], None))
+};
+let imageResource = (state: UiState, view, index) => {
+  let post = List.at(postsFor(state.feeds, view), index) :> Option.withDefault(fixture("missing"));
+  post.image
+};
+let main = () => {
+  let size = Geometry.Size(80, 24, 8, 16);
+  let state = stateOf(fixtures("active-", 40, 0));
+  let initial = Render.render(None, state, size);
+  expect(!Preload.needsPreparation(Some(initial.memory), .{ ..state, scrolling = true, scrollFrame = 1 }, size), "unchanged animation ticks must reuse the prepared reachability plan");
+  expect(Preload.needsPreparation(Some(initial.memory), .{ ..state, selected = 1 }, size), "navigation must prepare the newly reachable window immediately");
+  let resourceUpdate = Data.publishPostMedia(state, "active-0", Resource.Ready(Some(Image.Image("", "", 800, 200, None))), Resource.Ready(None));
+  expect(Preload.needsPreparation(Some(initial.memory), .{ ..resourceUpdate, scrolling = true }, size), "image completion must invalidate preparation during animation");
+  let nextPost = fixture("new-neighbor");
+  let neighborUpdate = Tabs.loadedState(state, OwnPosts, FeedPage([nextPost.post], None), [nextPost]);
+  expect(neighborUpdate.renderVersion == state.renderVersion && Preload.needsPreparation(Some(initial.memory), neighborUpdate, size), "inactive-tab page completion must invalidate preparation without repainting the active feed");
+  let longJump = .{ ..initial.memory, model = .{ ..initial.memory.model, scrollOffset = 0, scrollTarget = 10000 } };
+  expect(Preload.needsPreparation(Some(longJump), .{ ..state, scrolling = true, scrollFrame = 1 }, size), "large jumps must keep warming the path between separate prepared windows");
+  let split = panes(contentBody(size), size);
+  let layout = FeedLayout(split.feed.width, size, Image.Fit);
+  let heights = Feed.cardHeights(postsFor(state.feeds, Timeline), layout);
+  let offset = Scroll.itemOffset(heights, 16, 1);
+  let old = initial.memory;
+  let remembered = .{ ..old, model = .{ ..old.model, scrollOffset = offset, scrollTarget = offset } };
+  let windows = Preload.surfaces(Some(remembered), state, size);
+  let ranked = Reach.rank(windows, Preload.candidates(state, size), sameView);
+  let first = List.at(ranked, 0) :> Option.withDefault(Reach.Ranked(99, Data.MediaRequest(Timeline, "missing", true)));
+  expect(first.value.uri == "active-16", "preload must follow the actual scrolled viewport even when selection stays at the start");
+  let planned = Preload.planWith(Some(remembered), .{ ..state, scrolling = true }, size, fakeMedia, fakePage);
+  expect(List.length(planned.tasks) == 16, "preload must continue during scrolling with a bounded concurrency budget");
+  expect(Resource.isLoading(imageResource(planned.state, Timeline, 16)), "visible image must load first");
+  expect(Resource.isPending(imageResource(planned.state, Timeline, 0)), "unreachable earlier images must not load just because selection points there");
+  let again = Preload.planWith(Some(remembered), planned.state, size, fakeMedia, fakePage);
+  expect(again.tasks == [], "in-flight images must not be scheduled repeatedly on animation ticks");
+  let rec fillerLines = (count) => { if (count <= 0) { "" } else { "line\n" ++ fillerLines(count - 1) } };
+  let filler = fixture("filler");
+  let textOnly = .{ ..filler, post = .{ ..filler.post, text = fillerLines(split.feed.height - 3), image = None }, image = Resource.Ready(None) };
+  let below = stateOf([textOnly, fixture("immediately-below")]);
+  let belowPlan = Preload.planWith(None, below, size, fakeMedia, fakePage);
+  expect(Resource.isLoading(imageResource(belowPlan.state, Timeline, 1)), "next post's image download must start while it is entirely below the viewport");
+  let busyFeed = .{ ..state, feeds = modifyTab(state.feeds, OwnPosts, (tab) => { .{ ..tab, posts = [fixture("adjacent-first")] } }) };
+  let fair = Preload.planWith(None, busyFeed, size, fakeMedia, fakePage);
+  expect(Resource.isLoading(imageResource(fair.state, OwnPosts, 0)), "adjacent frame must get a download slot before deeper active-feed lookahead fills the budget");
+  let baseNeighbors = stateOf([fixture("same")]);
+  let neighbors = .{ ..baseNeighbors, feeds = .{ ..state.feeds, tabs = [
+    FeedTab(Timeline, "Following", [fixture("same")], None, true, false, "", 0, 0),
+    FeedTab(OwnPosts, "My posts", [fixture("same"), fixture("next")], None, true, false, "", 0, 0),
+    emptyTab(GeneratorFeed("far"), "Far"),
+    emptyTab(GeneratorFeed("previous"), "Previous"),
+  ] } };
+  let neighborPlan = Preload.planWith(None, neighbors, size, fakeMedia, fakePage);
+  expect(List.length(neighborPlan.tasks) == 3, "shared URI must fetch once, next-tab media once, and only the previous tab's first page");
+  expect(Resource.isLoading(imageResource(neighborPlan.state, OwnPosts, 0)) && Resource.isLoading(imageResource(neighborPlan.state, OwnPosts, 1)), "next tab's first frame must be reachable before activation");
+  let farTab = tabValue(neighborPlan.state.feeds, GeneratorFeed("far"));
+  expect(!farTab.loading, "semantic preloading must not cascade into every feed");
+  let previousTab = tabValue(neighborPlan.state.feeds, GeneratorFeed("previous"));
+  expect(previousTab.loading, "previous tab must preload across the wrap boundary");
+  let deep = .{ ..neighbors, feeds = modifyTab(neighbors.feeds, OwnPosts, (tab) => { .{ ..tab, posts = fixtures("next-", 40, 0), selected = 25 } }) };
+  let deepWindows = Preload.surfaces(None, deep, size);
+  let deepRanked = Reach.rank(deepWindows, Preload.candidates(deep, size), sameView);
+  expect(List.find(deepRanked, (item) => { item.value.uri == "next-0" }) != None && List.find(deepRanked, (item) => { item.value.uri == "next-25" }) != None, "both first frame and remembered landing frame of neighbor must be reachable");
+  let source = Views.decodeImageView(JSON{ thumb: "", fullsize: "", alt: "", aspectRatio: JSON{ width: 800, height: 200 } } :> Json.assert :> Result.debug) :> Result.debug;
+  expect(source.aspectRatio == Some(Views.AspectRatio(800, 200)), "decode aspect metadata before media download");
+  let absent = Views.decodeImageView(JSON{ thumb: "", fullsize: "", alt: "" } :> Json.assert :> Result.debug) :> Result.debug;
+  let invalid = Views.decodeImageView(JSON{ thumb: "", fullsize: "", alt: "", aspectRatio: JSON{ width: 0, height: 200 } } :> Json.assert :> Result.debug) :> Result.debug;
+  expect(absent.aspectRatio == None && invalid.aspectRatio == None, "missing or invalid aspect metadata must fall back safely");
+  let unknownPost = fixture("unknown");
+  let unknown = .{ ..unknownPost, post = .{ ..unknownPost.post, image = Some(.{ ..source, aspectRatio = None }) } };
+  expect(Feed.imageRows(40, 14, size, Image.Fit, unknown) == 2, "unknown aspect placeholder must stay compact");
+  neighborPlan.tasks :> Task.collectList :> Task.map((patches) => {
+    let completed = List.foldLeft(patches, neighborPlan.state, (current, patch) => { patch(current) });
+    let shared = match(imageResource(completed, Timeline, 0), imageResource(completed, OwnPosts, 0)) {
+      (Resource.Ready(Some(left)), Resource.Ready(Some(right))) => { left.width == right.width && left.height == right.height },
+      _ => { false },
+    };
+    expect(shared, "shared completion must update copies across tabs");
+    expect(completed.view == Timeline && completed.selected == 0, "background neighbor loading must preserve navigation");
+    let loaded = tabValue(completed.feeds, GeneratorFeed("previous"));
+    expect(loaded.loaded && !loaded.loading, "semantic neighbor first page must settle while inactive");
+    let warm = Preload.planWith(None, completed, size, fakeMedia, fakePage);
+    expect(Resource.isLoading(imageResource(warm.state, GeneratorFeed("previous"), 0)), "newly reachable page must trigger its image preload before activation");
+    let failed = Tabs.failedPage(neighborPlan.state, GeneratorFeed("previous"), "offline");
+    let retry = Preload.planWith(None, failed, size, fakeMedia, fakePage);
+    expect(retry.tasks == [], "failed speculative feed must not retry in a background loop");
+    print("preload probe: ok")
+  })
+};

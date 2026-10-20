@@ -30,12 +30,14 @@ let apc = (control, payload) => {
 
 let deleteAll = match(Cap.renderer) {
   Cap.KittyRenderer => { apc("a=d,d=A,q=2", "") },
+  Cap.SixelRenderer => { "" },
   Cap.HalfBlockRenderer => { "" },
 };
 
 let deleteImage = (identifier) => {
   match(Cap.renderer) {
     Cap.KittyRenderer => { apc(`a=d,d=I,i=${Text.of(identifier)},q=2`, "") },
+    Cap.SixelRenderer => { "" },
     Cap.HalfBlockRenderer => { "" },
   }
 };
@@ -204,7 +206,7 @@ let pngUrl = (url) => {
   }) :> Result.withDefault(url)
 };
 
-let loadPng = (url, alt) => {
+let loadPngWithPixels = (url, alt, decodePixels) => {
   let inspectStatus = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
     Result|response.ok, response.status|
       :> Result.map((ok, status) => {
@@ -235,22 +237,19 @@ let loadPng = (url, alt) => {
           :> Result.mapErr(Xrpc.JavaScriptFailure)
           :> Task.fromResult
           :> Task.andThen((base64) => {
-            match(Cap.renderer) {
-              Cap.KittyRenderer => {
-                Result|buffer :> .readUInt32BE(16), buffer :> .readUInt32BE(20)|
-                  :> Result.mapErr(Xrpc.JavaScriptFailure)
-                  :> Task.fromResult
-                  :> Task.map((width, height) => {
-                    Image(base64, alt, width, height, None)
-                  })
-              },
-              Cap.HalfBlockRenderer => {
-                PngJsr.decode(buffer)
-                  :> Task.mapErr(Xrpc.JavaScriptFailure)
-                  :> Task.map((pixels) => {
-                    Image(base64, alt, pixels.width, pixels.height, Some(pixels))
-                  })
-              },
+            if (decodePixels && Cap.renderer != Cap.KittyRenderer) {
+              PngJsr.decode(buffer)
+                :> Task.mapErr(Xrpc.JavaScriptFailure)
+                :> Task.map((pixels) => {
+                  Image(base64, alt, pixels.width, pixels.height, Some(pixels))
+                })
+            } else {
+              Result|buffer :> .readUInt32BE(16), buffer :> .readUInt32BE(20)|
+                :> Result.mapErr(Xrpc.JavaScriptFailure)
+                :> Task.fromResult
+                :> Task.map((width, height) => {
+                  Image(base64, alt, width, height, None)
+                })
             }
           })
       })
@@ -264,6 +263,13 @@ let loadPng = (url, alt) => {
     :> decodePng
 };
 
+let loadPng = (url, alt) => { loadPngWithPixels(url, alt, true) };
+
+-- The interactive host decodes these bytes in its image worker.
+let loadEncoded = (source: PostImage) => {
+  loadPngWithPixels(source.thumb, source.alt, false)
+};
+
 let load = (source: PostImage) => {
   loadPng(source.thumb, source.alt)
 };
@@ -273,4 +279,11 @@ let loadAvatar = (url) => {
     :> .replace("/img/avatar/plain/", "/img/avatar_thumbnail/plain/")
     :> Result.withDefault(url);
   loadPng(thumbnail, "")
+};
+
+let loadEncodedAvatar = (url) => {
+  let thumbnail = url
+    :> .replace("/img/avatar/plain/", "/img/avatar_thumbnail/plain/")
+    :> Result.withDefault(url);
+  loadPngWithPixels(thumbnail, "", false)
 };

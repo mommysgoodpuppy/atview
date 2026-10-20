@@ -49,6 +49,21 @@ let settleStep = match(step) => {
   Quit => { SettledQuit },
 };
 
+let prepareStep = (step, transform) => {
+  match(settleStep(step)) {
+    SettledQuit => { Quit },
+    Settled(state, tasks) => {
+      match(settleStep(transform(state))) {
+        SettledQuit => { Quit },
+        Settled(next, extra) => {
+          let combined = List.append(tasks, extra);
+          match(combined) { [] => { Continue(next) }, _ => { SpawnMany(next, combined) }, }
+        },
+      }
+    },
+  }
+};
+
 let rec applyEvents = match(update, events, running) => {
   (_, [], _) => { Continue(running) },
   (_, [Event.CellSize(width, height), ..rest], _) => {

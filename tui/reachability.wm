@@ -1,0 +1,60 @@
+-- Resource reachability is separate from painting/clipping. Surfaces can be
+-- spatially nearby or connected by a semantic navigation action (e.g. a tab).
+from "./geometry.wm" import * as Geometry;
+
+record Viewport = { visible: Geometry.Rect, nearby: Geometry.Rect };
+record Surface<Key> = { key: Key, viewport: Viewport, distance: Number };
+record Candidate<Key, Value> = { key: Key, bounds: Geometry.Rect, value: Value };
+record Ranked<Value> = { priority: Number, value: Value };
+
+let overlaps = (left, right) => {
+  let area = Geometry.intersect(left, right);
+  area.width > 0 && area.height > 0
+};
+let expand = (visible: Geometry.Rect, content: Geometry.Rect, left, top, right, bottom) => {
+  Viewport(visible, Geometry.intersect(content,
+    Geometry.rect(visible.x - left, visible.y - top, visible.width + left + right, visible.height + top + bottom)))
+};
+let priority = (surfaces, candidate, sameKey) => {
+  let rec find = match(remaining, best) => {
+    ([], _) => { best },
+    ([surface, ..tail], _) => {
+      let candidatePriority = if (!sameKey(surface.key, candidate.key)) { None } else {
+        if (overlaps(surface.viewport.visible, candidate.bounds)) { Some(if (surface.distance <= 0) { 0 } else { surface.distance * 2 - 1 }) } else {
+          if (overlaps(surface.viewport.nearby, candidate.bounds)) { Some(surface.distance * 2 + 2) } else { None }
+        }
+      };
+      let next = match(candidatePriority) {
+        None => { best },
+        Some(newPriority) => {
+          match(best) {
+            None => { Some(newPriority) },
+            Some(oldPriority) => { Some(if (newPriority < oldPriority) { newPriority } else { oldPriority }) },
+          }
+        },
+      };
+      find(tail, next)
+    },
+  };
+  find(surfaces, None)
+};
+let rank = (surfaces, candidates, sameKey) => {
+  let rec collect = match(remaining) => {
+    [] => { [] },
+    [candidate, ..tail] => {
+      match(priority(surfaces, candidate, sameKey)) {
+        None => { collect(tail) },
+        Some(value) => { [Ranked(value, candidate.value), ..collect(tail)] },
+      }
+    },
+  };
+  -- Stable buckets keep declaration order among equally reachable resources.
+  let ranked = collect(candidates);
+  let rec ordered = (level, maximum) => {
+    if (level > maximum) { [] } else {
+      List.append(ranked :> List.filter((item) => { item.priority == level }), ordered(level + 1, maximum))
+    }
+  };
+  let maximum = List.foldLeft(ranked, 0, (value, item) => { if (item.priority > value) { item.priority } else { value } });
+  ordered(0, maximum)
+};

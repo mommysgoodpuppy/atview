@@ -1,0 +1,89 @@
+-- Offline regressions for feed text layout and background avatar scheduling.
+from "./model.wm" import *;
+from "./preload.wm" import * as Preload;
+from "../tui/scroll.wm" import * as Scroll;
+from "../tui/surface.wm" import * as Surface;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/reachability.wm" import * as Reach;
+from "./data.wm" import { republishPost, mergeMedia };
+from "./feed-view.wm" import { postLines, cardHeight, renderCards };
+from "../proto/api.wm" import { FeedPost };
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/resource.wm" import * as Resource;
+from "../proto/xrpc.wm" import { AppError };
+
+let expect = (condition, label) => {
+  if (condition) { void } else { Panic(label) }
+};
+
+let post = (uri, text) => {
+  -- Pending without a URL exercises scheduling and completion without network I/O.
+  UiPost(
+    FeedPost(uri, text, "today", "test.example", "Test", None, None, None, None, None, "test-cid", None),
+    Resource.Ready(None),
+    Resource.Pending,
+  )
+};
+
+let rec allAvatarsLoading = match(posts) => {
+  [] => { true },
+  [item, ..tail] => {
+    let current: UiPost = item;
+    match(current.avatar) {
+      Resource.Loading => { allAvatarsLoading(tail) },
+      _ => { false },
+    }
+  },
+};
+
+let rec allAvatarsComplete = match(posts) => {
+  [] => { true },
+  [item, ..tail] => {
+    let current: UiPost = item;
+    match(current.avatar) {
+      Resource.Ready(None) => { allAvatarsComplete(tail) },
+      _ => { false },
+    }
+  },
+};
+
+let rec applyPatches = match(patches, state) => {
+  ([], _) => { state },
+  ([patch, ..tail], _) => { applyPatches(tail, patch(state)) },
+};
+
+let main = () => {
+  let longText = "one two three four five six seven eight nine ten END";
+  let lines = postLines(longText, 9);
+  expect(List.length(lines) > 2, "long text must use more than two rows");
+  expect(List.at(lines, List.length(lines) - 1) == Some("END"), "last words must survive wrapping");
+  expect(postLines("first\n\nlast", 20) == ["first", "", "last"], "preserve paragraph breaks");
+  expect(postLines("abcdefghijk", 3) == ["abc", "def", "ghi", "jk"], "wrap unbroken text");
+  expect(postLines("abc", 0) == ["abc"], "zero width must terminate");
+  let pending = post("long", longText);
+  let item = UiPost(pending.post, Resource.Ready(None), Resource.Ready(None));
+  let size = Geometry.Size(80, 40, 8, 16);
+  let height = cardHeight(11, size, Image.Fit, item);
+  expect(height == 4 + List.length(lines), "card height must include every text row");
+  let output = renderCards(Geometry.rect(0, 0, 11, height), [item], 0, FeedLayout(11, size, Image.Fit));
+  expect(output :> .includes("END") :> Result.withDefault(false), "card must draw final text row");
+  let posts = [post("1", "one"), post("2", "two"), post("3", "three"), post("4", "four"), post("5", "five"), post("6", "six")];
+  let state = UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", posts, [], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+  let plan = Preload.plan(None, state, size);
+  expect(List.length(plan.tasks) == 6, "all six avatars must be scheduled at startup");
+  expect(allAvatarsLoading(postsFor(plan.state.feeds, Timeline)), "all scheduled avatars must be marked loading");
+  let replanned = Preload.plan(None, plan.state, size);
+  expect(List.length(replanned.tasks) == 0, "do not schedule loading avatars again");
+  let repeated = republishPost([post("same", "a"), post("same", "b")], "same", Resource.Ready(None), Resource.Ready(None));
+  expect(allAvatarsComplete(repeated), "publish media to every occurrence of a repeated post");
+  let failed: Resource.Resource<String, Option<Image.Image>> = Resource.Failed("decode failed");
+  expect(match(mergeMedia(failed, Resource.Loading)) { Resource.Failed(_) => { true }, _ => { false } }, "stale loading snapshot must not replace a completed failure");
+  plan.tasks :> Task.collectList :> Task.map((patches) => {
+    let completed = applyPatches(patches, plan.state);
+    expect(allAvatarsComplete(postsFor(completed.feeds, Timeline)), "every scheduled avatar must settle");
+    let settled = Preload.plan(None, completed, size);
+    expect(List.length(settled.tasks) == 0, "completed avatars must stay settled");
+    print("feed probe: ok")
+  })
+};

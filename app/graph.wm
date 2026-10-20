@@ -2,6 +2,7 @@
 
 from "./data.wm" import { loadUiThread, withThread };
 from "./model.wm" import *;
+from "./reaction-model.wm" import * as Reaction;
 from "../proto/api.wm" import { FeedPost, threadAuthenticated };
 from "../proto/xrpc.wm" import { AppError, describeError };
 from "../tui/command.wm" import * as Command;
@@ -60,7 +61,8 @@ let threadModel = match(uri, resource) => {
   (_, ThreadCacheFailed(message)) => { ThreadFailed(uri, message) },
 };
 
-let publishThreadResource = (state: UiState, uri, resource) => {
+let publishThreadResource = (state: UiState, uri, incoming) => {
+  let resource = Reaction.applyResource(state.feeds.reactions, incoming);
   let cached = withThreadGraph(
     state,
     putThreadNode(uri, resource, state.threadGraph),

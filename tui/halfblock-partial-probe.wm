@@ -1,0 +1,71 @@
+-- First-pass scrolling must use prepared pixels, including crops never seen before.
+from "./image-host.wm" import * as Host;
+from "./halfblock.wm" import * as Half;
+from "./image.wm" import * as Image;
+from "./geometry.wm" import * as Geometry;
+from "./png.wm" import * as Png;
+from "./ansi.wm" import * as Ansi;
+from "./timer.wm" import * as Timer;
+from "./terminal-cap.wm" import * as Cap;
+from js.module("node:buffer") import { Buffer };
+let expect = (condition, label) => { if (condition) { void } else { Host.stop(); Panic(label) } };
+let rec idle = (remaining) => {
+  if (Host.isIdle()) { Task.succeed(void) } else {
+    if (remaining <= 0) { Host.stop(); Panic("worker timeout") } else {
+      Timer.delay(5) :> Task.andThen((_) => { idle(remaining - 1) })
+    }
+  }
+};
+let main = () => {
+  expect(Cap.renderer == Cap.HalfBlockRenderer, "run with ATVIEW_IMAGE_BACKEND=half");
+  let bytes = Buffer.alloc(31 * 47 * 4, 255) :> Result.debug;
+  let rec fill = (index) => {
+    if (index >= 31 * 47) { void } else {
+      let _ = Png.writeByte(bytes, index * 4, index % 256);
+      let _ = Png.writeByte(bytes, index * 4 + 1, (index * 17) % 256);
+      let _ = Png.writeByte(bytes, index * 4 + 2, (index * 43) % 256);
+      let _ = Png.writeByte(bytes, index * 4 + 3, (index * 11) % 256);
+      fill(index + 1)
+    }
+  };
+  fill(0);
+  let pixels = Png.Pixels(bytes, 31, 47);
+  let image = Image.Image("", "gradient", 31, 47, Some(pixels));
+  let size = Geometry.Size(80, 24, 8, 16);
+  let outputs = Js.Array.fromList([]: List<String>);
+  Host.start((output) => { let _ = outputs :> .push(output); void });
+  let area = Geometry.rect(2, 0, 12, 10);
+  let viewport = Geometry.rect(4, 1, 8, 5);
+  let modes = [Image.Fit, Image.Fill];
+  let _ = modes :> List.map((mode) => { Host.preloadClipped(area, Geometry.rect(4, 0, 8, 10), size, mode, image) });
+  idle(1000) :> Task.map((_) => {
+    let _ = modes :> List.map((mode) => {
+      let (ox, oy, columns, count, sx, sy, sw, sh) = Half.mapping(area, mode, pixels);
+      let rec positions = (y, step) => {
+        if (y < -10 || y > 8) { void } else {
+          let moving = Geometry.rect(2, y, 12, 10);
+          let actual = Host.renderClipped(1, moving, viewport, size, mode, image);
+          let clipped = Geometry.intersect(Geometry.rect(2 + ox, y + oy, columns, count), viewport);
+          let rec rows = (row) => {
+            if (row >= clipped.height || clipped.width <= 0) { "" } else {
+              let sourceRow = clipped.y - y - oy + row;
+              let firstColumn = clipped.x - 2 - ox;
+              let rec cells = (x) => {
+                if (x >= clipped.width) { "" } else {
+                  Half.cell(pixels, sx, sy, sw, sh, columns, count, firstColumn + x, sourceRow) ++ cells(x + 1)
+                }
+              };
+              Ansi.cursorTo(clipped.y + row + 1, clipped.x + 1) ++ cells(0) ++ Ansi.reset ++ rows(row + 1)
+            }
+          };
+          expect(actual == rows(0), "crop must retain original sampling, position, colors, and alpha");
+          expect(Host.isIdle(), "first pass through every new crop must never queue work");
+          positions(y + step, step)
+        }
+      };
+      positions(-10, 1); positions(8, -1); void
+    });
+    expect(Js.Array.toList(outputs) == [], "preloading and cached crops must never emit delayed paints");
+    Host.stop(); print("half-block partial probe: ok; first-pass bidirectional crops reuse prepared rows")
+  })
+};

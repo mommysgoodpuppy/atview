@@ -1,138 +1,73 @@
 -- Application event transitions and asynchronous feed pagination.
 
-from "./data.wm" import { apiFeeds, feedMediaPlan, pendingPosts };
+from "./data.wm" import { pendingPosts };
+from "./tabs.wm" import * as Tabs;
 from "./graph.wm" import { buildPrefetchPlan, loadSelectedThread };
 from "./model.wm" import *;
-from "../proto/api.wm" import {
-  FeedPage,
-  loadMoreOwnPosts,
-  loadMoreTimeline,
-};
+from "./likes.wm" import * as Likes;
+from "./reaction-model.wm" import * as Reaction;
+from "../proto/api.wm" import * as Api;
+from "../proto/api.wm" import { FeedPage };
+from "../proto/views.wm" import * as Views;
+from "../proto/feed-tabs.wm" import * as SavedFeeds;
 from "../proto/xrpc.wm" import { AppError, JavaScriptFailure, describeError };
 from "../tui/command.wm" import * as Command;
 from "../tui/event.wm" import * as Event;
+from "../tui/geometry.wm" import * as Geometry;
 from "../tui/timer.wm" import * as Timer;
+from "../tui/scroll.wm" import * as Scroll;
 
-let loadedState = match(state, requestedView, page, posts) => {
-  (_, _, _, _) => {
-    let feeds = match(requestedView) {
-      Timeline => {
-        UiFeeds(
-          state.feeds.handle,
-          state.feeds.did,
-          state.feeds.accessJwt,
-          List.append(state.feeds.timelinePosts, posts),
-          state.feeds.ownPosts,
-          page.cursor,
-          state.feeds.ownCursor,
-        )
-      },
-      OwnPosts => {
-        UiFeeds(
-          state.feeds.handle,
-          state.feeds.did,
-          state.feeds.accessJwt,
-          state.feeds.timelinePosts,
-          List.append(state.feeds.ownPosts, posts),
-          state.feeds.timelineCursor,
-          page.cursor,
-        )
-      },
-    };
-    let status = if (state.view == requestedView) {
-      if (List.length(posts) > 0) { "" } else { "end of feed" }
-    } else {
-      state.status
-    };
-    UiState(
-      state.selected,
-      state.view,
-      state.imageScale,
-      feeds,
-      false,
-      status,
-      state.renderVersion + 1,
-      state.thread,
-      state.threadGraph,
-      state.scrolling,
-      state.scrollVersion,
-      state.scrollFrame,
-      state.scrollRows,
-    )
-  },
-};
-
+-- Shared page operations are also used by semantic neighbor preloading.
+let loadedState = Tabs.loadedState;
+let failedPage = Tabs.failedPage;
+let requestPage = (state: UiState) => { Tabs.requestPageFor(state, state.view) };
 let loadNextPage = (state: UiState) => {
   let requestedView = state.view;
-  let request = match(state.view) {
-    Timeline => { loadMoreTimeline(apiFeeds(state.feeds), 30) },
-    OwnPosts => { loadMoreOwnPosts(apiFeeds(state.feeds), 30) },
-  };
   let plan = buildPrefetchPlan(state);
-  let pending = UiState(
-    plan.state.selected,
-    plan.state.view,
-    plan.state.imageScale,
-    plan.state.feeds,
-    true,
-    "",
-    plan.state.renderVersion,
-    plan.state.thread,
-    plan.state.threadGraph,
-    plan.state.scrolling,
-    plan.state.scrollVersion,
-    plan.state.scrollFrame,
-    plan.state.scrollRows,
-  );
-  let task = request
-    :> Task.map((page: FeedPage) => {
-      (page, pendingPosts(page.posts))
-    })
-    :> Task.map((loadedPage) => {
-      let (page, posts) = loadedPage;
-      (current: UiState) => {
-        loadedState(current, requestedView, page, posts)
-      }
-    })
-    :> Task.recover((error) => {
-      (current: UiState) => {
-        UiState(
-          current.selected,
-          current.view,
-          current.imageScale,
-          current.feeds,
-          false,
-          describeError(error),
-          current.renderVersion,
-          current.thread,
-          current.threadGraph,
-          current.scrolling,
-          current.scrollVersion,
-          current.scrollFrame,
-          current.scrollRows,
-        )
-      }
-    });
+  let feeds = modifyTab(plan.state.feeds, requestedView, (tab) => {
+    .{ ..tab, loading = true, status = "" }
+  });
+  let pending = .{ ..plan.state, feeds = feeds, loading = true, status = "" };
+  let task = requestPage(state) :> Task.map((page: FeedPage) => {
+    let posts = pendingPosts(page.posts);
+    (current: UiState) => { loadedState(current, requestedView, page, posts) }
+  }) :> Task.recover((error) => {
+    (current: UiState) => { failedPage(current, requestedView, describeError(error)) }
+  });
   Command.SpawnMany(pending, [task, ..plan.tasks])
 };
+let hasMore = (state: UiState) => {
+  let tab = tabValue(state.feeds, state.view);
+  !tab.loaded || tab.cursor != None
+};
 
-let hasMore = match(state) => {
-  _ => {
-    match(state.view) {
-      Timeline => {
-        match(state.feeds.timelineCursor) {
-          Some(_) => { true },
-          None => { false },
-        }
-      },
-      OwnPosts => {
-        match(state.feeds.ownCursor) {
-          Some(_) => { true },
-          None => { false },
-        }
-      },
-    }
-  },
+-- Save navigation before leaving, and invalidate old animation timers on entry.
+let switchTabState = (state: UiState, view) => {
+  if (sameView(state.view, view)) { state } else {
+    let feeds = modifyTab(state.feeds, state.view, (tab) => {
+      .{ ..tab, selected = state.selected, scrollRows = state.scrollRows }
+    });
+    let target = tabValue(feeds, view);
+    .{ ..state, view = view, feeds = feeds, selected = target.selected,
+      scrollRows = target.scrollRows, loading = target.loading, status = target.status,
+      scrolling = false, scrollVersion = state.scrollVersion + 1, scrollFrame = 0,
+      thread = ThreadLoading(""), renderVersion = state.renderVersion + 1 }
+  }
+};
+let activateTab = (state: UiState, view) => {
+  let next = switchTabState(state, view);
+  let tab = tabValue(next.feeds, view);
+  if (!tab.loaded && !tab.loading) { loadNextPage(next) } else { loadSelectedThread(next) }
+};
+let tabIndex = activeTabIndex;
+let adjacentTab = (state: UiState, delta) => {
+  let count = List.length(state.feeds.tabs);
+  let index = tabIndex(state) + delta;
+  let wrapped = if (index < 0) { count - 1 } else { if (index >= count) { 0 } else { index } };
+  match(List.at(state.feeds.tabs, wrapped)) {
+    None => { Command.Continue(state) },
+    Some(tab) => { activateTab(state, tab.view) },
+  }
 };
 
 let moveDown = (state) => {
@@ -170,43 +105,13 @@ let scrollByRows = (state: UiState, rows) => {
 let updateStateBase = match(key, state) => {
   (Event.CtrlC, _) => { Command.Quit },
   (Event.Character("q"), _) => { Command.Quit },
-  (Event.Character("t"), _) => {
-    loadSelectedThread(
-      UiState(
-        0,
-        Timeline,
-        state.imageScale,
-        state.feeds,
-        state.loading,
-        "",
-        state.renderVersion + 1,
-        state.thread,
-        state.threadGraph,
-        state.scrolling,
-        state.scrollVersion,
-        state.scrollFrame,
-        state.scrollRows,
-      ),
-    )
-  },
-  (Event.Character("m"), _) => {
-    loadSelectedThread(
-      UiState(
-        0,
-        OwnPosts,
-        state.imageScale,
-        state.feeds,
-        state.loading,
-        "",
-        state.renderVersion + 1,
-        state.thread,
-        state.threadGraph,
-        state.scrolling,
-        state.scrollVersion,
-        state.scrollFrame,
-        state.scrollRows,
-      ),
-    )
+  (Event.Character("L"), _) => { Likes.toggle(state) },
+  (Event.Character("u"), _) => { adjacentTab(state, -1) },
+  (Event.Character("i"), _) => { adjacentTab(state, 1) },
+  (Event.Character("t"), _) => { activateTab(state, Timeline) },
+  (Event.Character("m"), _) => { activateTab(state, OwnPosts) },
+  (Event.Character("r"), _) => {
+    if (state.loading || !hasMore(state)) { Command.Continue(state) } else { loadNextPage(state) }
   },
   (Event.Character("f"), _) => {
     Command.Continue(
@@ -304,7 +209,7 @@ let updateStateBase = match(key, state) => {
   (Event.End, _) => {
     loadSelectedThread(
       UiState(
-        List.length(postsFor(state.feeds, state.view)) - 1,
+        Geometry.nonNegative(List.length(postsFor(state.feeds, state.view)) - 1),
         state.view,
         state.imageScale,
         state.feeds,
@@ -323,38 +228,6 @@ let updateStateBase = match(key, state) => {
   _ => { Command.Continue(state) },
 };
 
-let scheduleMedia = match(step) => {
-  Command.Quit => { Command.Quit },
-  Command.Continue(state) => {
-    if (state.scrolling) {
-      Command.Continue(state)
-    } else {
-      let media = feedMediaPlan(state);
-      match(media.tasks) {
-        [] => { Command.Continue(media.state) },
-        _ => { Command.SpawnMany(media.state, media.tasks) },
-      }
-    }
-  },
-  Command.Spawn(state, task) => {
-    if (state.scrolling) {
-      Command.Spawn(state, task)
-    } else {
-      let media = feedMediaPlan(state);
-      Command.SpawnMany(media.state, [task, ..media.tasks])
-    }
-  },
-  Command.SpawnMany(state, tasks) => {
-    if (state.scrolling) {
-      Command.SpawnMany(state, tasks)
-    } else {
-      let media = feedMediaPlan(state);
-      Command.SpawnMany(media.state, List.append(tasks, media.tasks))
-    }
-  },
-  Command.Await(state, task) => { Command.Await(state, task) },
-};
-
 let scrollKey = match(key) => {
   Event.Up => { true },
   Event.Down => { true },
@@ -366,6 +239,10 @@ let scrollKey = match(key) => {
   Event.WheelDown => { true },
   Event.Character("j") => { true },
   Event.Character("k") => { true },
+  Event.Character("u") => { true },
+  Event.Character("i") => { true },
+  Event.Character("t") => { true },
+  Event.Character("m") => { true },
   _ => { false },
 };
 
@@ -428,16 +305,14 @@ let animationFrame = (version, frame, milliseconds, finalFrame) => {
 };
 
 let animationFrames = (version) => {
-  [
-    animationFrame(version, 1, 16, false),
-    animationFrame(version, 2, 32, false),
-    animationFrame(version, 3, 48, false),
-    animationFrame(version, 4, 64, false),
-    animationFrame(version, 5, 80, false),
-    animationFrame(version, 6, 96, false),
-    animationFrame(version, 7, 112, false),
-    animationFrame(version, 8, 500, true),
-  ]
+  let count = List.length(Scroll.frameTimes);
+  let rec frames = match(times, index) => {
+    ([], _) => { [] },
+    ([milliseconds, ..tail], _) => {
+      [animationFrame(version, index, milliseconds, index == count), ..frames(tail, index + 1)]
+    },
+  };
+  frames(Scroll.frameTimes, 1)
 };
 
 let beginScroll = match(step) => {
@@ -469,5 +344,5 @@ let beginScroll = match(step) => {
 let updateState = (key, state) => {
   let updated = updateStateBase(key, state);
   let scrolling = if (scrollKey(key)) { beginScroll(updated) } else { updated };
-  scheduleMedia(scrolling)
+  scrolling
 };

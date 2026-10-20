@@ -1,0 +1,35 @@
+-- Interactive fixture for the viewport-aware preparation host hook.
+from "./runtime.wm" import * as Runtime;
+from "./surface.wm" import * as Surface;
+from "./command.wm" import * as Command;
+from "./event.wm" import * as Event;
+from "./timer.wm" import * as Timer;
+from "./geometry.wm" import * as Geometry;
+record State = { phase: Number, prepared: Number, width: Number, height: Number, remembered: Bool };
+let prepare = (state: State, size: Geometry.Size, previous) => {
+  let remembered = match(previous) { None => { false }, Some(_) => { true }, };
+  let next = .{ ..state, prepared = state.prepared + 1, width = size.width, height = size.height, remembered = remembered };
+  if (state.phase == 0 && state.prepared == 0) {
+    Command.Spawn(next, Timer.delay(1) :> Task.map((_) => {
+      (current: State) => { .{ ..current, phase = 1 } }
+    }))
+  } else { Command.Continue(next) }
+};
+let update = (event, state: State) => {
+  match(event) {
+    Event.Character("q") => { Command.Quit },
+    Event.CtrlC => { Command.Quit },
+    Event.Character("j") => { Command.Continue(.{ ..state, phase = 2 }) },
+    _ => { Command.Continue(state) },
+  }
+};
+let render = (_previous, state: State, size) => {
+  Surface.frame(state.phase, size, [Surface.Raw(
+    "phase=" ++ Text.of(state.phase) ++ " prepared=" ++ Text.of(state.prepared) ++
+      " size=" ++ Text.of(state.width) ++ "x" ++ Text.of(state.height) ++
+      " memory=" ++ Text.of(state.remembered) ++ "\n")])
+};
+let main = () => {
+  Runtime.runRetainedManagedPrepared(State(0, 0, 0, 0, false), [],
+    (state) => { Command.Continue(state) }, prepare, update, render)
+};

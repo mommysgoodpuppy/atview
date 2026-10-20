@@ -3,6 +3,7 @@ from "./geometry.wm" import * as Geometry;
 from "./image.wm" import { Image, Scale, Fit, Fill };
 from "./png.wm" import * as Png;
 from "./theme.wm" import * as Theme;
+from "./sixel.wm" import { Target };
 from js.global("Math") import { floor };
 
 let down = (value) => {
@@ -24,30 +25,42 @@ let pixel = (pixels, x, y) => {
   )
 };
 
-let mapping = (area: Geometry.Rect, mode: Scale, pixels: Png.Pixels) => {
+let mappingSize = (area: Geometry.Rect, mode: Scale, pixelWidth, pixelHeight) => {
   match(mode) {
   Fit => {
-    let scale = if (area.width / pixels.width < (area.height * 2) / pixels.height) {
-      area.width / pixels.width
+    let scale = if (area.width / pixelWidth < (area.height * 2) / pixelHeight) {
+      area.width / pixelWidth
     } else {
-      (area.height * 2) / pixels.height
+      (area.height * 2) / pixelHeight
     };
-    let columns = Geometry.clamp(1, area.width, down(pixels.width * scale));
-    let rows = Geometry.clamp(1, area.height, down((pixels.height * scale + 1) / 2));
-    (down((area.width - columns) / 2), down((area.height - rows) / 2), columns, rows, 0, 0, pixels.width, pixels.height)
+    let columns = Geometry.clamp(1, area.width, down(pixelWidth * scale));
+    let rows = Geometry.clamp(1, area.height, down((pixelHeight * scale + 1) / 2));
+    (down((area.width - columns) / 2), down((area.height - rows) / 2), columns, rows, 0, 0, pixelWidth, pixelHeight)
   },
   Fill => {
     let targetRatio = area.width / (area.height * 2);
-    let imageRatio = pixels.width / pixels.height;
+    let imageRatio = pixelWidth / pixelHeight;
     if (imageRatio > targetRatio) {
-      let sourceWidth = down(pixels.height * targetRatio);
-      (0, 0, area.width, area.height, down((pixels.width - sourceWidth) / 2), 0, sourceWidth, pixels.height)
+      let sourceWidth = down(pixelHeight * targetRatio);
+      (0, 0, area.width, area.height, down((pixelWidth - sourceWidth) / 2), 0, sourceWidth, pixelHeight)
     } else {
-      let sourceHeight = down(pixels.width / targetRatio);
-      (0, 0, area.width, area.height, 0, down((pixels.height - sourceHeight) / 2), pixels.width, sourceHeight)
+      let sourceHeight = down(pixelWidth / targetRatio);
+      (0, 0, area.width, area.height, 0, down((pixelHeight - sourceHeight) / 2), pixelWidth, sourceHeight)
     }
   },
   }
+};
+
+let mapping = (area, mode, pixels: Png.Pixels) => { mappingSize(area, mode, pixels.width, pixels.height) };
+-- Half-block rasters use one column and two source samples per terminal cell.
+-- Keep the full placement while clipping; shrinking the area would rescale it.
+let viewportTarget = (area: Geometry.Rect, viewport: Geometry.Rect, mode, width, height) => {
+  let (ox, oy, columns, count, sx, sy, sw, sh) = mappingSize(area, mode, width, height);
+  let clipped = Geometry.intersect(Geometry.rect(area.x + ox, area.y + oy, columns, count), viewport);
+  Target(clipped.x - area.x, clipped.y - area.y, clipped.width, clipped.height,
+    sx + (clipped.x - area.x - ox) * sw / columns,
+    sy + (clipped.y - area.y - oy) * sh / count,
+    clipped.width * sw / columns, clipped.height * sh / count)
 };
 
 let cell = (pixels, sourceX, sourceY, sourceWidth, sourceHeight, columns, rows, x, y) => {
@@ -68,12 +81,23 @@ let rec rowCells = (pixels, sourceX, sourceY, sourceWidth, sourceHeight, columns
   }
 };
 
+-- Position-independent prepared rows, shared by every scroll placement/crop.
+let rasterRows = (target: Target, pixels: Png.Pixels) => {
+  let rec build = (y) => {
+    if (y >= target.height) { [] } else {
+      [rowCells(pixels, target.sourceX, target.sourceY, target.sourceWidth, target.sourceHeight,
+        target.width, target.height, 0, y) ++ Ansi.reset, ..build(y + 1)]
+    }
+  };
+  build(0)
+};
+
 let rec rows = (area, pixels, offsetX, offsetY, columns, count, sourceX, sourceY, sourceWidth, sourceHeight, y) => {
   if (y >= count) {
     ""
   } else {
     Ansi.cursorTo(area.y + offsetY + y + 1, area.x + offsetX + 1) ++
-      rowCells(pixels, sourceX, sourceY, sourceWidth, sourceHeight, columns, count, 0, y) ++
+      rowCells(pixels, sourceX, sourceY, sourceWidth, sourceHeight, columns, count, 0, y) ++ Ansi.reset ++
       rows(area, pixels, offsetX, offsetY, columns, count, sourceX, sourceY, sourceWidth, sourceHeight, y + 1)
   }
 };
@@ -93,7 +117,7 @@ let renderPixels = (area: Geometry.Rect, mode: Scale, pixels: Png.Pixels) => {
       sourceHeight) 
         = mapping(area, mode, pixels);
         
-    rows(area, pixels, offsetX, offsetY, columns, count, sourceX, sourceY, sourceWidth, sourceHeight, 0) ++ Ansi.reset
+    rows(area, pixels, offsetX, offsetY, columns, count, sourceX, sourceY, sourceWidth, sourceHeight, 0)
   }
 };
 

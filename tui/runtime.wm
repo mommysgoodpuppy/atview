@@ -7,8 +7,10 @@ from "./command.wm" import *;
 from "./event.wm" import * as Event;
 from "./geometry.wm" import * as Geometry;
 from "./surface.wm" import * as Surface;
+from "./image-host.wm" import * as ImageHost;
 from js.module("node:tty") import type { ReadStream, WriteStream };
 from js.module("node:events") import { once as onceEvent };
+from js.global("Deno") import { consoleSize };
 from js.global("process") import unsafe {
   stdin: ReadStream,
   stdout: WriteStream,
@@ -36,13 +38,30 @@ let propertyNumber = (target, name, fallback) => {
   }
 };
 
+let sizeNumber = (target: Js.Object, name, fallback) => {
+  match(Reflect.get(target, name)) {
+    None => { fallback },
+    Some(raw) => {
+      let decoded: Result<Number, Js.Error> = raw :> Json.assert;
+      decoded :> Result.withDefault(fallback)
+    },
+  }
+};
+
 let terminalSize = (output, cellWidth, cellHeight) => {
-  Geometry.Size(
-    propertyNumber(output, "columns", 80),
-    propertyNumber(output, "rows", 24),
-    cellWidth,
-    cellHeight,
-  )
+  -- node:tty's columns/rows can remain cached across resize under Deno. Query
+  -- the host each time so layout and reachability use the actual viewport.
+  let measured: Result<Js.Object, Js.Error> = consoleSize();
+  match(measured) {
+    Ok(size) => { Geometry.Size(sizeNumber(size, "columns", 80), sizeNumber(size, "rows", 24), cellWidth, cellHeight) },
+    Err(_) => {
+      Geometry.Size(
+        propertyNumber(output, "columns", 80),
+        propertyNumber(output, "rows", 24),
+        cellWidth, cellHeight,
+      )
+    },
+  }
 };
 
 let write = (output, value) => {
@@ -50,6 +69,7 @@ let write = (output, value) => {
 };
 
 let restore = (input, output, status) => {
+  ImageHost.stop();
   let _ = input.setRawMode(false);
   let _ = input.pause();
   let _ = write(output, Ansi.leave);
@@ -182,6 +202,19 @@ let inputEvents = (input) => {
     })
 };
 
+let prepareApplied = (applied, output, memory, prepare) => {
+  match(applied) {
+    AppliedQuit => { AppliedQuit },
+    Applied(preparedRunning, tasks) => {
+      let (model, cw, ch) = preparedRunning;
+      match(settleStep(prepare(model, terminalSize(output, cw, ch), Some(memory)))) {
+        SettledQuit => { AppliedQuit },
+        Settled(next, extra) => { Applied((next, cw, ch), List.append(tasks, extra)) },
+      }
+    },
+  }
+};
+
 let rec waitRetained = (
   input,
   output,
@@ -193,12 +226,13 @@ let rec waitRetained = (
   nextId,
   inputTask,
   settle,
+  prepare,
 ) => {
   let _ = nextWake(inputTask, pending)
     :> Task.map((wake) => {
       match(wake) {
         InputWake(events) => {
-          match(applyConcurrent(update, events, running)) {
+          match(prepareApplied(applyConcurrent(update, events, running), output, memory, prepare)) {
             AppliedQuit => {
               restore(input, output, 0)
             },
@@ -219,6 +253,7 @@ let rec waitRetained = (
                     followingId,
                     inputEvents(input),
                     settle,
+                    prepare,
                   )
                 },
               }
@@ -227,7 +262,7 @@ let rec waitRetained = (
         },
         TaskWake(id, patch) => {
           let (model, cellWidth, cellHeight) = running;
-          match(settleStep(settle(patch(model)))) {
+          match(settleStep(prepareStep(settle(patch(model)), (state) => { prepare(state, terminalSize(output, cellWidth, cellHeight), Some(memory)) }))) {
             SettledQuit => {
               restore(input, output, 0)
             },
@@ -250,6 +285,7 @@ let rec waitRetained = (
                     followingId,
                     inputTask,
                     settle,
+                    prepare,
                   )
                 },
               }
@@ -336,10 +372,11 @@ let rec listenRetained = (input, output, update, render, running, memory) => {
   }
 };
 
-let runRetainedManaged = (
+let runRetainedManagedPrepared = (
   initial,
   initialTasks,
   settle,
+  prepare,
   update,
   render,
 ) => {
@@ -350,34 +387,48 @@ let runRetainedManaged = (
       print("could not enable raw mode (is stdin a terminal?): " ++ errorText(error))
     },
     Ok(_) => {
-      let initialRunning = (initial, 1, 2);
+      ImageHost.start((value) => { let _ = write(output, value); void });
       let initialSize = terminalSize(output, 1, 2);
-      let initialFrame = render(None, initial, initialSize);
-      let _ = input.resume();
-      match(write(
-        output,
-        Ansi.enter ++ Ansi.queryCellSize ++ initialFrame.output,
-      )) {
-        Err(_) => { restore(input, output, 1) },
-        Ok(_) => {
-          let queued = enqueue(initialTasks, [], 0);
-          let (pending, nextId) = queued;
-          waitRetained(
-            input,
+      match(settleStep(prepare(initial, initialSize, None))) {
+        SettledQuit => { restore(input, output, 0) },
+        Settled(prepared, preparedTasks) => {
+          let initialRunning = (prepared, 1, 2);
+          let initialFrame = render(None, prepared, initialSize);
+          let _ = input.resume();
+          match(write(
             output,
-            update,
-            render,
-            initialRunning,
-            initialFrame.memory,
-            pending,
-            nextId,
-            inputEvents(input),
-            settle,
-          )
+            Ansi.enter ++ Ansi.queryCellSize ++ initialFrame.output,
+          )) {
+            Err(_) => { restore(input, output, 1) },
+            Ok(_) => {
+              let queued = enqueue(List.append(initialTasks, preparedTasks), [], 0);
+              let (pending, nextId) = queued;
+              waitRetained(
+                input,
+                output,
+                update,
+                render,
+                initialRunning,
+                initialFrame.memory,
+                pending,
+                nextId,
+                inputEvents(input),
+                settle,
+                prepare,
+              )
+            },
+          }
         },
       }
     },
   }
+};
+
+-- Preparation receives actual terminal geometry and previous retained memory
+-- before every paint, including startup, input, and background completion.
+let runRetainedManaged = (initial, tasks, settle, update, render) => {
+  runRetainedManagedPrepared(initial, tasks, settle,
+    (state, _size, _memory) => { Continue(state) }, update, render)
 };
 
 let runRetainedWith = (initial, initialTasks, update, render) => {

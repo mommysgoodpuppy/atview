@@ -1,0 +1,106 @@
+-- Real PNG decoding/encoding through the worker, while its tab stays inactive.
+from "./model.wm" import *;
+from "./preload.wm" import * as Preload;
+from "./feed-view.wm" import * as Feed;
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+from "../tui/element.wm" import * as Ui;
+from "../tui/image-host.wm" import * as Host;
+from "../tui/image.wm" import * as Image;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/resource.wm" import * as Resource;
+from "../tui/scroll.wm" import * as Scroll;
+from "../tui/surface.wm" import * as Surface;
+from "../tui/reactive.wm" import * as Reactive;
+from "../tui/terminal-cap.wm" import * as Cap;
+from "../tui/command.wm" import * as Command;
+from "../tui/sixel.wm" import * as Sixel;
+from "../tui/halfblock.wm" import * as HalfBlock;
+from "../tui/timer.wm" import * as Timer;
+from "../tui/ansi.wm" import * as Ansi;
+record Placement = { identifier: Number, area: Geometry.Rect, viewport: Geometry.Rect, scale: Image.Scale, image: Image.Image };
+let expect = (value, message) => { if (value) { void } else { Host.stop(); Panic(message) } };
+let rec placement = match(element) => {
+  Ui.ImageViewport(identifier, area, viewport, scale, image) => { Some(Placement(identifier, area, viewport, scale, image)) },
+  Ui.Fragment(children) => {
+    let rec find = match(items) => {
+      [] => { None },
+      [child, ..tail] => { match(placement(child)) { None => { find(tail) }, Some(value) => { Some(value) }, } },
+    };
+    find(children)
+  },
+  _ => { None },
+};
+let rec waitIdle = (remaining) => {
+  if (Host.isIdle()) { Task.succeed(void) } else {
+    if (remaining <= 0) { Host.stop(); Panic("warm image worker timed out") } else {
+      Timer.delay(5) :> Task.andThen((_) => { waitIdle(remaining - 1) })
+    }
+  }
+};
+let nearbyImage = (image, size: Geometry.Size) => {
+  if (Cap.renderer != Cap.SixelRenderer) { Task.succeed(void) } else {
+    let outputs = Js.Array.fromList([]: List<String>);
+    Host.start((output) => { let _ = outputs :> .push(output); void });
+    let split = panes(contentBody(size), size);
+    let rec lines = (count) => { if (count <= 0) { "" } else { "line\n" ++ lines(count - 1) } };
+    let text = FeedPost("filler", lines(split.feed.height - 3), "today", "test", "Test", None, None, None, None, None, "cid", None);
+    let first = UiPost(text, Resource.Ready(None), Resource.Ready(None));
+    let source = Views.PostImage("", "", "", Some(Views.AspectRatio(2, 2)));
+    let second = UiPost(.{ ..text, uri = "below-viewport", text = "body", image = Some(source) }, Resource.Ready(Some(image)), Resource.Ready(None));
+    let state = UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", [first, second], [], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+    let tree = Feed.cards(Geometry.rect(split.feed.x, split.feed.y, split.feed.width, split.feed.height * 3), [first, second], 0, FeedLayout(split.feed.width, size, Image.Fit), true);
+    let target = placement(tree) :> Option.withDefault(Placement(0, split.feed, split.feed, Image.Fit, image));
+    expect(target.area.y >= split.feed.y + split.feed.height, "fixture image must start entirely below the paint viewport");
+    let _ = Preload.prepare(state, size, None);
+    expect(!Host.isIdle(), "image immediately below the viewport must encode before any scroll input");
+    let _ = Host.deleteAll();
+    waitIdle(1000) :> Task.map((_) => {
+      expect(Js.Array.toList(outputs) == [], "nearby image preparation must not paint offscreen content");
+      let entered = .{ ..target.area, y = target.area.y - split.feed.height };
+      let painted = Host.renderClipped(target.identifier, entered, target.viewport, size, target.scale, target.image);
+      expect(painted != "" && Host.isIdle(), "scrolling the next post into view must reuse prepared output immediately");
+      Host.stop(); print("nearby image probe: ok; image below viewport ready before scrolling")
+    })
+  }
+};
+let main = () => {
+  expect(Cap.renderer != Cap.KittyRenderer, "run with ATVIEW_IMAGE_BACKEND=sixel or half");
+  let outputs = Js.Array.fromList([]: List<String>);
+  Host.start((output) => { let _ = outputs :> .push(output); void });
+  let image = Image.Image("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGP4z8DAAMIM/////w8AH+4F+7C4l8kAAAAASUVORK5CYII=", "", 2, 2, None);
+  let source = Views.PostImage("", "", "", Some(Views.AspectRatio(2, 2)));
+  let item = UiPost(FeedPost("next", "body", "today", "test", "Test", None, None, None, Some(source), None, "cid", None), Resource.Ready(Some(image)), Resource.Ready(None));
+  let state = UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", [], [item], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+  let size = Geometry.Size(80, 24, 8, 16);
+  let split = panes(contentBody(size), size);
+  let tree = Feed.cards(split.feed, [item], 0, FeedLayout(split.feed.width, size, Image.Fit), true);
+  let target = placement(tree) :> Option.withDefault(Placement(0, split.feed, split.feed, Image.Fit, image));
+  let _ = Preload.prepare(state, size, None);
+  expect(!Host.isIdle(), "inactive adjacent tab must queue real image encoding before activation");
+  let _ = Host.deleteAll();
+  waitIdle(1000) :> Task.andThen((_) => {
+    expect(Js.Array.toList(outputs) == [], "speculative encoding must never paint on the current tab");
+    let painted = Host.renderClipped(target.identifier, target.area, target.viewport, size, target.scale, target.image);
+    expect(painted != "", "switching to the preloaded tab must return cached image output immediately");
+    let expected = match(Cap.renderer) {
+      Cap.SixelRenderer => { Sixel.render(target.area, size, target.scale, target.image) },
+      _ => { HalfBlock.render(target.area, target.scale, target.image) },
+    };
+    expect(painted == expected, "preloaded image must match the real tab's placement and pixels");
+    -- Activate a second warm request while it is still encoding. It must be
+    -- promoted to a real placement without waiting for a second encoding.
+    let changed = Geometry.rect(4, 5, 7, 3);
+    let _ = Host.preloadClipped(changed, changed, size, Image.Fill, image);
+    expect(Host.render(42, changed, size, Image.Fill, image) == "", "in-flight warming must attach the foreground placement");
+    waitIdle(1000) :> Task.map((_) => {
+      let wanted = match(Cap.renderer) {
+        Cap.SixelRenderer => { Sixel.render(changed, size, Image.Fill, image) },
+        _ => { HalfBlock.render(changed, Image.Fill, image) },
+      };
+      expect(Js.Array.toList(outputs) == [Ansi.beginSynchronizedUpdate ++ wanted ++ Ansi.reset ++ Ansi.endSynchronizedUpdate], "only the activated warm image may emit output");
+      Host.stop();
+      print("next tab image probe: ok; inactive PNG encoded without output, immediate cached activation")
+    })
+  }) :> Task.andThen((_) => { nearbyImage(image, size) })
+};

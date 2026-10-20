@@ -1,0 +1,61 @@
+-- Session reaction overrides keep duplicate posts and late feed/thread results
+-- consistent while the AppView is still indexing the repository write.
+from "./model.wm" import *;
+from "../proto/api.wm" import { FeedPost };
+from "../proto/views.wm" import * as Views;
+
+let reactionFor = (feeds: UiFeeds, post: FeedPost) => {
+  List.find(feeds.reactions, (reaction) => { reaction.uri == post.uri })
+    :> Option.withDefault(PostReaction(post.uri, post.viewerLike, post.likeCount, false))
+};
+let applyPosts = (reactions, posts) => {
+  posts :> List.map((item: UiPost) => {
+    match(List.find(reactions, (reaction) => { reaction.uri == item.post.uri })) {
+      None => { item },
+      Some(reaction) => {
+        .{ ..item, post = .{ ..item.post, viewerLike = reaction.viewerLike, likeCount = reaction.likeCount } }
+      },
+    }
+  })
+};
+let rec applyThread = (reactions, node) => {
+  match(node) {
+    UiThreadPost(post, avatar, children) => {
+      let updated = match(List.find(reactions, (reaction) => { reaction.uri == post.uri })) {
+        None => { post },
+        Some(reaction) => { .{ ..post, viewerLike = reaction.viewerLike, likeCount = reaction.likeCount } },
+      };
+      UiThreadPost(updated, avatar, children :> List.map((child) => { applyThread(reactions, child) }))
+    },
+    _ => { node },
+  }
+};
+let applyResource = (reactions, resource) => {
+  match(resource) {
+    ThreadCached(thread) => { ThreadCached(applyThread(reactions, thread)) },
+    _ => { resource },
+  }
+};
+let remember = (state: UiState, reaction: PostReaction) => {
+  let reactions = [reaction, ..List.filter(state.feeds.reactions, (old) => { old.uri != reaction.uri })];
+  let thread = match(state.thread) {
+    ThreadReady(uri, node) => { ThreadReady(uri, applyThread(reactions, node)) },
+    _ => { state.thread },
+  };
+  .{ ..state, feeds = .{ ..state.feeds, preloadVersion = state.feeds.preloadVersion + 1, reactions = reactions,
+    reactionVersion = state.feeds.reactionVersion + 1,
+    tabs = state.feeds.tabs :> List.map((tab) => { .{ ..tab, posts = applyPosts(reactions, tab.posts) } }) },
+    thread = thread,
+    threadGraph = state.threadGraph :> List.map((node) => { .{ ..node, resource = applyResource(reactions, node.resource) } }) }
+};
+let completed = (state: UiState, before: PostReaction, viewerLike) => {
+  let delta = if (viewerLike == None) { -1 } else { 1 };
+  let count = (before.likeCount :> Option.withDefault(0)) + delta;
+  remember(state, PostReaction(before.uri, viewerLike, Some(if (count < 0) { 0 } else { count }), false))
+};
+let failed = (state: UiState, before: PostReaction, view, message) => {
+  let restored = remember(state, .{ ..before, pending = false });
+  let status = "like failed: " ++ message;
+  .{ ..restored, feeds = modifyTab(restored.feeds, view, (tab) => { .{ ..tab, status = status } }),
+    status = if (sameView(state.view, view)) { status } else { state.status } }
+};

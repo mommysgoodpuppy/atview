@@ -1,0 +1,17 @@
+from "./host-identity.wm" import { key as identityKey, keyFor };
+from "./geometry.wm" import * as Geometry;
+from js.global("Reflect") import unsafe { get: (Js.Value, String) -> Js.Value };
+let main = () => {
+  let first = Geometry.rect(0, 0, 1, 1);
+  let second = Geometry.rect(0, 0, 1, 1);
+  let a = identityKey(get(Js.Array.fromList([first]), "0"));
+  let b = identityKey(get(Js.Array.fromList([first]), "0"));
+  let c = identityKey(get(Js.Array.fromList([second]), "0"));
+  let third = Geometry.rect(1, 0, 1, 1);
+  let fourth = Geometry.rect(2, 0, 1, 1);
+  let thirdSlot = Js.Array.fromList([third]);
+  let fourthSlot = Js.Array.fromList([fourth]);
+  let c1 = keyFor(get(thirdSlot, "0"), "same-encoded-content");
+  let c2 = keyFor(get(fourthSlot, "0"), "same-encoded-content");
+  if (a == b && a != c && c1 == c2) { print("identity probe: ok") } else { Panic("immutable object identity must be stable and distinguish equal copies") }
+};

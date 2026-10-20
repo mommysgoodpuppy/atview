@@ -1,7 +1,7 @@
 -- Reactive render dependencies and incremental terminal surface updates.
 
 from "./model.wm" import *;
-from "./feed-view.wm" import { cardHeights, visibleStart };
+from "./feed-view.wm" import { cardHeights };
 from "./view.wm" import *;
 from "../tui/ansi.wm" import * as Ansi;
 from "../tui/draw.wm" import * as Draw;
@@ -11,6 +11,7 @@ from "../tui/reactive.wm" import * as Reactive;
 from "../tui/scroll.wm" import * as Scroll;
 from "../tui/surface.wm" import * as Surface;
 from "../tui/image.wm" import * as Image;
+from "../tui/tabs.wm" import * as TabBar;
 
 
 let threadKey = match(thread) => {
@@ -55,7 +56,7 @@ let footerRegion = (model: RenderModel) => {
     List.length(postsFor(model.state.feeds, model.state.view)),
     model.state.view,
     model.state.loading,
-    model.state.status,
+    footerStatus(model.state),
     graph.ready,
     graph.pending,
     model.size,
@@ -67,12 +68,6 @@ let sameSize = (left: Geometry.Size, right: Geometry.Size) => {
     left.height <= right.height && left.height >= right.height &&
     left.cellWidth <= right.cellWidth && left.cellWidth >= right.cellWidth &&
     left.cellHeight <= right.cellHeight && left.cellHeight >= right.cellHeight
-};
-
-let sameView = match(left, right) => {
-  (Timeline, Timeline) => { true },
-  (OwnPosts, OwnPosts) => { true },
-  _ => { false },
 };
 
 let sameScale = match(left, right) => {
@@ -139,6 +134,8 @@ let sameRenderDependency = match(left, right) => {
   (MediaSurface, MediaSurface) => { true },
   (ThreadSurface, ThreadSurface) => { true },
   (FooterSurface, FooterSurface) => { true },
+  (TabsSurface, TabsSurface) => { true },
+  (ReactionSurface, ReactionSurface) => { true },
   _ => { false },
 };
 
@@ -162,6 +159,21 @@ let footerSignal = Reactive.signal(
   (model: RenderModel) => { model },
 );
 
+let tabsSignal = Reactive.signal(TabsSurface, (model: RenderModel) => { model });
+let tabsEffect = Reactive.effect(
+  "tabs",
+  Reactive.read(tabsSignal) :> Reactive.map((model) => {
+    Reactive.commands([Surface.Raw(renderTabsAt(model.state, model.size, model.tabScroll.position))])
+  }),
+);
+
+let reactionSignal = Reactive.signal(ReactionSurface, (model: RenderModel) => { model });
+let reactionEffect = Reactive.effect("reactions",
+  Reactive.read(reactionSignal) :> Reactive.map((model) => {
+    Reactive.commands([Surface.Raw(renderReactions(model.state, model.size, model.start, model.scrollInset))])
+  }),
+);
+
 let selectionEffect = Reactive.effect(
   "selection",
   Reactive.read(selectionSignal) :> Reactive.map((model) => {
@@ -174,6 +186,7 @@ let selectionEffect = Reactive.effect(
             state,
             model.size,
             model.start,
+            model.scrollInset,
             selected,
             true,
             true,
@@ -186,6 +199,7 @@ let selectionEffect = Reactive.effect(
             state,
             model.size,
             model.start,
+            model.scrollInset,
             selected,
             false,
             false,
@@ -206,6 +220,7 @@ let mediaEffect = Reactive.effect(
             model.state,
             model.size,
             model.start,
+            model.scrollInset,
             !model.state.scrolling,
           ),
         )
@@ -232,9 +247,14 @@ let footerEffect = Reactive.effect(
   }),
 );
 
-let renderEffects = [selectionEffect, mediaEffect, threadEffect, footerEffect];
+let renderEffects = [selectionEffect, mediaEffect, threadEffect, footerEffect, tabsEffect, reactionEffect];
 
 let changedDependencies = (previous: RenderModel, next: RenderModel) => {
+  let tabsChanged = !sameView(previous.state.view, next.state.view) ||
+    previous.tabScroll.position != next.tabScroll.position ||
+    !sameSize(previous.size, next.size) ||
+    (previous.state.feeds.tabs :> List.map((tab) => { tab.title })) !=
+      (next.state.feeds.tabs :> List.map((tab) => { tab.title }));
   let selectionChanged = !sameSelectionRegion(
     selectionRegion(previous),
     selectionRegion(next),
@@ -271,10 +291,10 @@ let changedDependencies = (previous: RenderModel, next: RenderModel) => {
   } else {
     []
   };
-  List.append(
-    selectionKeys,
-    List.append(mediaKeys, List.append(threadKeys, footerKeys)),
-  )
+  let tabsKeys = if (tabsChanged) { [TabsSurface] } else { [] };
+  let reactionKeys = if (previous.state.feeds.reactionVersion != next.state.feeds.reactionVersion) { [ReactionSurface] } else { [] };
+  List.append(reactionKeys, List.append(tabsKeys, List.append(selectionKeys,
+    List.append(mediaKeys, List.append(threadKeys, footerKeys)))))
 };
 
 let synchronized = match(commands) => {
@@ -293,74 +313,110 @@ let synchronized = match(commands) => {
   },
 };
 
-let render = (previous, state: UiState, size: Geometry.Size) => {
-  let posts = postsForState(state);
-  let (body, _) = Geometry.reserveBottom(Geometry.screen(size), 1);
-  let split = panes(body, size);
-  let start = visibleStart(
-    posts,
+-- Input starts an animation clock before layout knows whether the viewport
+-- needs to move. Only actual viewport motion should hide media or invalidate
+-- the retained feed surface.
+let paintState = (state: UiState, moving) => {
+  UiState(
     state.selected,
-    0,
-    WindowLayout(
-      split.feed.width,
-      split.feed.height,
-      size,
-      state.imageScale,
-    ),
-  );
+    state.view,
+    state.imageScale,
+    state.feeds,
+    state.loading,
+    state.status,
+    state.renderVersion,
+    state.thread,
+    state.threadGraph,
+    moving,
+    state.scrollVersion,
+    state.scrollFrame,
+    state.scrollRows,
+  )
+};
+
+let project = (previous, state: UiState, size: Geometry.Size) => {
+  let posts = postsFor(state.feeds, state.view);
+  let body = contentBody(size);
+  let split = panes(body, size);
   let layout = FeedLayout(split.feed.width, size, state.imageScale);
   let heights = cardHeights(posts, layout);
-  let selectedTarget = Scroll.offsetOf(heights, start, 0);
-  let maximumOffset = Scroll.offsetOf(
-    heights,
-    Geometry.nonNegative(List.length(heights) - 1),
-    0,
-  );
+  let feedStrip = Scroll.Strip(heights, split.feed.height, 1);
+  let labels = state.feeds.tabs :> List.map((tab) => { tab.title });
+  let tabStrip = TabBar.track(size.width, labels);
+  let selectedTarget = Scroll.reveal(feedStrip, state.selected, 0);
+  let advanceFrame = match(previous) {
+    None => { true },
+    Some(graph) => {
+      state.scrollVersion != graph.model.state.scrollVersion || state.scrollFrame != graph.model.state.scrollFrame
+    },
+  };
   let targetOffset = match(previous) {
     None => { selectedTarget },
     Some(graph) => {
       let old = graph.model;
       let rowDelta = state.scrollRows - old.state.scrollRows;
-      if (rowDelta != 0) {
-        Geometry.clamp(0, maximumOffset, old.scrollTarget + rowDelta)
-      } else {
-        if (
-          !sameView(state.view, old.state.view) ||
-          !sameScale(state.imageScale, old.state.imageScale) ||
-          !sameSize(size, old.size) ||
-          state.scrollVersion != old.state.scrollVersion
-        ) {
-          selectedTarget
+      let geometryChanged = if (state.renderVersion != old.state.renderVersion) {
+        cardHeights(postsFor(old.state.feeds, old.state.view), layout) != heights
+      } else { false };
+      if (!sameView(state.view, old.state.view)) { selectedTarget } else {
+        if (!sameScale(state.imageScale, old.state.imageScale) || !sameSize(size, old.size) || geometryChanged) {
+          Scroll.reveal(feedStrip, state.selected, old.scrollTarget)
         } else {
-          old.scrollTarget
+          if (rowDelta != 0) { Scroll.limit(feedStrip, old.scrollTarget + rowDelta) } else {
+            if (state.selected != old.state.selected || state.scrollVersion != old.state.scrollVersion) {
+              Scroll.reveal(feedStrip, state.selected, old.scrollTarget)
+            } else { Scroll.limit(feedStrip, old.scrollTarget) }
+          }
         }
       }
     },
   };
   let currentOffset = match(previous) {
     None => { targetOffset },
-    Some(graph) => { graph.model.scrollOffset },
+    Some(graph) => {
+      if (sameView(state.view, graph.model.state.view)) { Scroll.limit(feedStrip, graph.model.scrollOffset) } else { targetOffset }
+    },
   };
-  let nextOffset = if (state.scrolling) {
-    Scroll.approach(currentOffset, targetOffset)
-  } else {
-    targetOffset
+  let feedMotion = Scroll.frame(Scroll.Motion(currentOffset, targetOffset), state.scrolling, advanceFrame);
+  let nextOffset = feedMotion.position;
+  let tabMotion = match(previous) {
+    None => {
+      let target = Scroll.reveal(tabStrip, activeTabIndex(state), 0);
+      Scroll.Motion(target, target)
+    },
+    Some(graph) => {
+      let next = Scroll.retarget(tabStrip, graph.model.tabScroll, activeTabIndex(state));
+      Scroll.frame(next, state.scrolling && sameSize(size, graph.model.size), advanceFrame)
+    },
   };
-  let viewport = Scroll.locate(heights, nextOffset);
-  let nextModel = RenderModel(
+  let viewport = Scroll.locateAxis(feedStrip, nextOffset);
+  let painted = paintState(
     state,
+    state.scrolling && (nextOffset != currentOffset || nextOffset != targetOffset),
+  );
+  RenderModel(
+    painted,
     size,
     viewport.start,
+    viewport.inset,
     nextOffset,
     targetOffset,
-  );
+    tabMotion,
+  )
+};
+
+let render = (previous, state: UiState, size: Geometry.Size) => {
+  let nextModel = project(previous, state, size);
+  let painted = nextModel.state;
+  let viewport = Scroll.Viewport(nextModel.start, nextModel.scrollInset);
+  let tabMotion = nextModel.tabScroll;
   match(previous) {
     None => {
       let mounted = Reactive.mount(nextModel, renderEffects);
       Surface.frame(
         mounted.graph,
         size,
-        [Surface.Raw(renderViewport(state, size, viewport.start, viewport.inset))],
+        [Surface.Raw(renderViewportAt(painted, size, viewport.start, viewport.inset, tabMotion.position))],
       )
     },
     Some(graph) => {
@@ -369,7 +425,7 @@ let render = (previous, state: UiState, size: Geometry.Size) => {
         Surface.frame(
           mounted.graph,
           size,
-          [Surface.Raw(renderViewport(state, size, viewport.start, viewport.inset))],
+          [Surface.Raw(renderViewportAt(painted, size, viewport.start, viewport.inset, tabMotion.position))],
         )
       } else {
         let flushed = Reactive.flush(

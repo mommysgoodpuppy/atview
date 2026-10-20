@@ -16,6 +16,8 @@ record FeedPost = {
   likeCount: Option<Number>,
   image: Option<Views.PostImage>,
   avatar: Option<String>,
+  cid: String,
+  viewerLike: Option<String>,
 };
 
 record OwnFeed = {
@@ -51,6 +53,8 @@ let feedPost = (post) => {
     post.likeCount,
     post.image,
     post.author.avatar,
+    post.cid,
+    post.viewerLike,
   )
 };
 
@@ -159,6 +163,13 @@ let authorFeedPage = (actor, limit, cursor) => {
   ) :> decodeAuthorFeedT
 };
 
+let authorFeedPageAuthenticated = (jwt, actor, limit, cursor) => {
+  query("https://bsky.social", Some(jwt), "app.bsky.feed.getAuthorFeed", List.append([
+    Xrpc.QueryParam("actor", actor), Xrpc.QueryParam("limit", Text.of(limit)),
+    Xrpc.QueryParam("filter", "posts_with_replies"), Xrpc.QueryParam("includePins", "false"),
+  ], cursorParams(cursor))) :> decodeAuthorFeedT
+};
+
 let authorFeed = (actor, limit) => {
   authorFeedPage(actor, limit, None)
 };
@@ -188,7 +199,7 @@ let searchPosts = (term, limit) => {
   ) :> decodeSearchT
 };
 
-let searchPostsAuthenticated = (session, term, limit) => {
+let searchPostsAuthenticated = (session: Auth.Session, term, limit) => {
   query(
     "https://bsky.social",
     Some(session.accessJwt),
@@ -229,7 +240,7 @@ let threadAuthenticated = (accessJwt, uri, depth) => {
 
 let loadOwnFeed = (limit) => {
   Auth.login() :> Task.andThen((session) => {
-    authorFeedPage(session.handle, limit, None) :> Task.map((feed) => {
+    authorFeedPageAuthenticated(session.accessJwt, session.handle, limit, None) :> Task.map((feed) => {
       OwnFeed(session.handle, session.did, feed.posts :> List.map(feedPost))
     })
   })
@@ -239,7 +250,7 @@ let loadAppFeeds = (limit) => {
   Auth.login() :> Task.andThen((session) => {
     Task|
       timelinePage(session.accessJwt, limit, None),
-      authorFeedPage(session.handle, limit, None)
+      authorFeedPageAuthenticated(session.accessJwt, session.handle, limit, None)
     | :> Task.map((home, own) => {
       AppFeeds(
         session.handle,
@@ -269,7 +280,7 @@ let loadMoreOwnPosts = (feeds: AppFeeds, limit) => {
   match(feeds.ownCursor) {
     None => { Task.succeed(FeedPage([], None)) },
     Some(cursor) => {
-      authorFeedPage(feeds.handle, limit, Some(cursor)) :> Task.map((page) => {
+      authorFeedPageAuthenticated(feeds.accessJwt, feeds.handle, limit, Some(cursor)) :> Task.map((page) => {
         FeedPage(page.posts :> List.map(feedPost), page.cursor)
       })
     },

@@ -39,6 +39,15 @@ let rect = (x, y, width, height) => {
   Rect(x, y, nonNegative(width), nonNegative(height))
 };
 
+-- Intersection keeps the original coordinate space, including negative origins.
+let intersect = (left: Rect, right: Rect) => {
+  let x = if (left.x > right.x) { left.x } else { right.x };
+  let y = if (left.y > right.y) { left.y } else { right.y };
+  let endX = if (left.x + left.width < right.x + right.width) { left.x + left.width } else { right.x + right.width };
+  let endY = if (left.y + left.height < right.y + right.height) { left.y + left.height } else { right.y + right.height };
+  rect(x, y, endX - x, endY - y)
+};
+
 let screen = (size) => {
   rect(0, 0, size.width, size.height)
 };
