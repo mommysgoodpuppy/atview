@@ -2,7 +2,7 @@
 -- ANSI conversion happens only in the drawing layer.
 
 from js.global("Math") import {
-  floor: (Number) => Number,
+  floor: Number -> Number,
 };
 
 record Size = {

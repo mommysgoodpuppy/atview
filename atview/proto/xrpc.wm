@@ -25,7 +25,7 @@ let describeError = match(error) => {
     describeJsError(jsError)
   },
   HttpFailure(status, body) => {
-    "HTTP " ++ Result.textOf(status) ++ ": " ++ body
+    "HTTP " ++ Text.of(status) ++ ": " ++ body
   },
   ResponseShapeFailure(jsError) => {
     "unexpected AppView response: " ++ describeJsError(jsError)

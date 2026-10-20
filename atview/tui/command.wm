@@ -5,23 +5,23 @@ from "./event.wm" import * as Event;
 type Step<State, Error> =
   | Continue<State>
   | Await<State, Task<State, Error>>
-  | Spawn<State, Task<(State) => State, Error>>
-  | SpawnMany<State, List<Task<(State) => State, Error>>>
+  | Spawn<State, Task<State -> State, Error>>
+  | SpawnMany<State, List<Task<State -> State, Error>>>
   | Quit;
 
 type Pending<State, Error> =
-  | Pending<Number, Task<(State) => State, Error>>;
+  | Pending<Number, Task<State -> State, Error>>;
 
 type Wake<State> =
   | InputWake<List<Event.Key>>
-  | TaskWake<Number, (State) => State>;
+  | TaskWake<Number, State -> State>;
 
 type Applied<State, Error> =
-  | Applied<(State, Number, Number), List<Task<(State) => State, Error>>>
+  | Applied<(State, Number, Number), List<Task<State -> State, Error>>>
   | AppliedQuit;
 
 type Settled<State, Error> =
-  | Settled<State, List<Task<(State) => State, Error>>>
+  | Settled<State, List<Task<State -> State, Error>>>
   | SettledQuit;
 
 

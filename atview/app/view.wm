@@ -21,8 +21,8 @@ let renderFooter = (state: UiState, size: Geometry.Size) => {
   };
   let graph = graphCounts(state.threadGraph);
   let background = if (graph.pending > 0) {
-    "   bg " ++ Result.textOf(graph.ready) ++
-      "+" ++ Result.textOf(graph.pending)
+    "   bg " ++ Text.of(graph.ready) ++
+      "+" ++ Text.of(graph.pending)
   } else {
     ""
   };
@@ -30,7 +30,7 @@ let renderFooter = (state: UiState, size: Geometry.Size) => {
     Draw.text(
       footer,
       " " ++ titleFor(feeds, state.view) ++ "   " ++
-        Result.textOf(state.selected + 1) ++ "/" ++ Result.textOf(List.length(posts)) ++
+        Text.of(state.selected + 1) ++ "/" ++ Text.of(List.length(posts)) ++
         activity ++ background ++
         "   t timeline   m my posts   f fit/fill   ↑/↓ j/k move   q quit ",
       Draw.status,

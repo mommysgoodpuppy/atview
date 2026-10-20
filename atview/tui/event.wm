@@ -3,7 +3,7 @@
 
 from "./ansi.wm" import * as Ansi;
 from js.global("String") import {
-  fromCharCode: (Number) => String,
+  fromCharCode: Number -> String,
 };
 
 type Key =

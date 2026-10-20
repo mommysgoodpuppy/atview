@@ -98,7 +98,7 @@ record BoundedThreadNodes = {
 
 record PrefetchPlan = {
   state: UiState,
-  tasks: List<Task<(UiState) => UiState, AppError>>,
+  tasks: List<Task<UiState -> UiState, AppError>>,
 };
 
 record GraphCounts = {
@@ -185,7 +185,7 @@ let panes = (body, size) => {
 };
 
 let countText = (value) => {
-  value :> Option.map(Result.textOf) :> Option.withDefault("0")
+  value :> Option.map(Text.of) :> Option.withDefault("0")
 };
 
 let move = (count, delta, state) => {

@@ -5,7 +5,7 @@
 -- is deterministic.
 
 from js.global("String") import unsafe {
-  fromCharCode: (Number) => String
+  fromCharCode: Number -> String
 };
 
 record Message = {

@@ -5,8 +5,8 @@ from "../proto/xrpc.wm" import * as Xrpc;
 from js.global("Deno") import {
   args: Js.Array<String>,
 };
-from js.global import {
-  Number as toNumber: (String) => Number,
+  from js.global import {
+  Number as toNumber: String -> Number,
 };
 
 let usage = `atview — direct AT Protocol AppView CLI
@@ -32,7 +32,7 @@ let optionString = (fallback, value) => {
 
 let optionNumber = (value) => {
   value
-    :> Option.map(Result.textOf)
+    :> Option.map(Text.of)
     :> Option.withDefault("?")
 };
 
@@ -80,7 +80,7 @@ let renderFeed = (feed) => {
 
 let renderSearch = (results) => {
   let total = match(results.hitsTotal) {
-    Some(value) => { "reported hits: " ++ Result.textOf(value) ++ "\n\n" },
+    Some(value) => { "reported hits: " ++ Text.of(value) ++ "\n\n" },
     None => { "" },
   };
   let cursor = match(results.cursor) {

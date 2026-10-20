@@ -7,7 +7,7 @@
 
 record Signal<Model, Key, Value> = {
   key: Key,
-  select: (Model) => Value,
+  select: Model -> Value,
 };
 
 record Observed<Key, Value> = {
@@ -16,7 +16,7 @@ record Observed<Key, Value> = {
 };
 
 record Reactive<Model, Key, Value> = {
-  run: (Model) => Observed<Key, Value>,
+  run: Model -> Observed<Key, Value>,
 };
 
 record Emission<Output> = {

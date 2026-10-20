@@ -4,7 +4,7 @@ from "./xrpc.wm" import * as Xrpc;
 from js.global("Deno") import { readTextFile };
 from js.global import { fetch };
 from js.global("JSON") import {
-  stringify: (Js.Value) => String,
+  stringify: Js.Value -> String,
 } as JSON;
 
 record Credentials = {
@@ -19,7 +19,7 @@ record Session = {
   did: String,
 };
 
-let envFile = "atview/.env";
+let envFile = ".env";
 
 let rec findValue = match(lines, prefix, width) => {
   ([], _, _) => {
@@ -84,7 +84,7 @@ let parseCredentials = (text: String) => {
 };
 
 let loadCredentials = () => {
-  let parseT = Monad.lift Task (text) => {
+  let parseT = Monad.via Task (text) => {
     parseCredentials(text)
       :> Task.fromResult
   };
@@ -94,14 +94,14 @@ let loadCredentials = () => {
 };
 
 let createSession = (credentials) => {
-  let encodeBody = Monad.liftError Task Xrpc.JavaScriptFailure (values) => {
+  let encodeBody = Monad.viaError Task Xrpc.JavaScriptFailure (values) => {
     let (identifier, password) = values;
     JSON.stringify(JSON{
       identifier: identifier,
       password: password,
     }) :> Task.fromResult
   };
-  let request = Monad.liftError Task Xrpc.JavaScriptFailure (body) => {
+  let request = Monad.viaError Task Xrpc.JavaScriptFailure (body) => {
     fetch(
       "https://bsky.social/xrpc/com.atproto.server.createSession",
       JSON{
@@ -111,14 +111,14 @@ let createSession = (credentials) => {
       },
     )
   };
-  let inspectStatus = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+  let inspectStatus = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
     Result|response.ok, response.status|
       :> Result.map((ok, status) => {
         (response, ok, status)
       })
       :> Task.fromResult
   };
-  let requireOk = Monad.lift Task (response, ok, status) => {
+  let requireOk = Monad.via Task (response, ok, status) => {
     if (ok) {
       Task.succeed(response)
     } else {
@@ -129,13 +129,13 @@ let createSession = (credentials) => {
         })
     }
   };
-  let readBody = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+  let readBody = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
     response :> .json() :> Task.andThen((raw) => {
       let body: Result<Js.Object, Js.Error> = raw :> Json.assert;
       body :> Task.fromResult
     })
   };
-  let decodeSession = Monad.liftError Task Xrpc.ResponseShapeFailure (body) => {
+  let decodeSession = Monad.viaError Task Xrpc.ResponseShapeFailure (body) => {
     let session: Result<Session, Js.Error> = body :> Json.assert;
     session :> Task.fromResult
   };
@@ -154,7 +154,7 @@ let login = () => {
 };
 
 let refreshSession = (session) => {
-  let request = Monad.liftError Task Xrpc.JavaScriptFailure (refreshJwt) => {
+  let request = Monad.viaError Task Xrpc.JavaScriptFailure (refreshJwt) => {
     fetch(
       "https://bsky.social/xrpc/com.atproto.server.refreshSession",
       JSON{
@@ -163,14 +163,14 @@ let refreshSession = (session) => {
       },
     )
   };
-  let inspectStatus = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+  let inspectStatus = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
     Result|response.ok, response.status|
       :> Result.map((ok, status) => {
         (response, ok, status)
       })
       :> Task.fromResult
   };
-  let requireOk = Monad.lift Task (response, ok, status) => {
+  let requireOk = Monad.via Task (response, ok, status) => {
     if (ok) {
       Task.succeed(response)
     } else {
@@ -181,13 +181,13 @@ let refreshSession = (session) => {
         })
     }
   };
-  let readBody = Monad.liftError Task Xrpc.JavaScriptFailure (response) => {
+  let readBody = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
     response :> .json() :> Task.andThen((raw) => {
       let body: Result<Js.Object, Js.Error> = raw :> Json.assert;
       body :> Task.fromResult
     })
   };
-  let decodeSession = Monad.liftError Task Xrpc.ResponseShapeFailure (body) => {
+  let decodeSession = Monad.viaError Task Xrpc.ResponseShapeFailure (body) => {
     let refreshed: Result<Session, Js.Error> = body :> Json.assert;
     refreshed :> Task.fromResult
   };

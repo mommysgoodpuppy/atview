@@ -2,7 +2,7 @@
 -- carrier values. Json.assert does not adapt record Option fields by itself.
 
 from js.global("Reflect") import {
-  get: (Js.Object, String) => Option<Js.Value>,
+  get: (Js.Object, String) -> Option<Js.Value>,
 } as Reflect;
 
 let optionalString = (body, key) => {

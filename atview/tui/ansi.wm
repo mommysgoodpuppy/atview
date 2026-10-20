@@ -1,7 +1,7 @@
 -- ANSI/ECMA-48 terminal controls kept in Workman rather than a host shim.
 
 from js.global("String") import {
-  fromCharCode: (Number) => String,
+  fromCharCode: Number -> String,
 };
 
 let esc = fromCharCode(27) :> Result.withDefault("");
@@ -19,25 +19,25 @@ let beginSynchronizedUpdate = csi ++ "?2026h";
 let endSynchronizedUpdate = csi ++ "?2026l";
 
 let cursorTo = (row, column) => {
-  csi ++ Result.textOf(row) ++ ";" ++ Result.textOf(column) ++ "H"
+  csi ++ Text.of(row) ++ ";" ++ Text.of(column) ++ "H"
 };
 
 let foreground = (code) => {
-  csi ++ "38;5;" ++ Result.textOf(code) ++ "m"
+  csi ++ "38;5;" ++ Text.of(code) ++ "m"
 };
 
 let background = (code) => {
-  csi ++ "48;5;" ++ Result.textOf(code) ++ "m"
+  csi ++ "48;5;" ++ Text.of(code) ++ "m"
 };
 
 let foregroundRgb = (red, green, blue) => {
-  csi ++ "38;2;" ++ Result.textOf(red) ++ ";" ++
-    Result.textOf(green) ++ ";" ++ Result.textOf(blue) ++ "m"
+  csi ++ "38;2;" ++ Text.of(red) ++ ";" ++
+    Text.of(green) ++ ";" ++ Text.of(blue) ++ "m"
 };
 
 let backgroundRgb = (red, green, blue) => {
-  csi ++ "48;2;" ++ Result.textOf(red) ++ ";" ++
-    Result.textOf(green) ++ ";" ++ Result.textOf(blue) ++ "m"
+  csi ++ "48;2;" ++ Text.of(red) ++ ";" ++
+    Text.of(green) ++ ";" ++ Text.of(blue) ++ "m"
 };
 
 let bold = csi ++ "1m";

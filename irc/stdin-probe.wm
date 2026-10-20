@@ -5,7 +5,7 @@ from js.global("process") import {
   stdin: ReadStream,
 };
 from js.global import {
-  String as toString: (Js.Value) => String,
+  String as toString: Js.Value -> String,
 };
 
 let main = () => {

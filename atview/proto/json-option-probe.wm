@@ -1,7 +1,7 @@
 -- Reduction for JSON Option adaptation behavior.
 
 from js.global("JSON") import {
-  parse: (String) => Js.Object,
+  parse: String -> Js.Object,
 } as JSON;
 
 record Payload = {
