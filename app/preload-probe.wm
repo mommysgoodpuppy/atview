@@ -36,7 +36,7 @@ let fakePage = (_state: UiState, view) => {
   Task.succeed(FeedPage([post.post], None))
 };
 let imageResource = (state: UiState, view, index) => {
-  let post = List.at(postsFor(state.feeds, view), index) :> Option.withDefault(fixture("missing"));
+  let post = List.at(postsFor(state.feeds, view), index) :> Option.getOr(fixture("missing"));
   post.image
 };
 let main = () => {
@@ -60,7 +60,7 @@ let main = () => {
   let remembered = .{ ..old, model = .{ ..old.model, scrollOffset = offset, scrollTarget = offset } };
   let windows = Preload.surfaces(Some(remembered), state, size);
   let ranked = Reach.rank(windows, Preload.candidates(state, size), sameView);
-  let first = List.at(ranked, 0) :> Option.withDefault(Reach.Ranked(99, Data.MediaRequest(Timeline, "missing", true)));
+  let first = List.at(ranked, 0) :> Option.getOr(Reach.Ranked(99, Data.MediaRequest(Timeline, "missing", true)));
   expect(first.value.uri == "active-16", "preload must follow the actual scrolled viewport even when selection stays at the start");
   let planned = Preload.planWith(Some(remembered), .{ ..state, scrolling = true }, size, fakeMedia, fakePage);
   expect(List.length(planned.tasks) == 16, "preload must continue during scrolling with a bounded concurrency budget");

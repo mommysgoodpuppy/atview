@@ -39,11 +39,11 @@ let mapError = match(resource, transform) => {
   (Ready(value), _) => { Ready(value) },
 };
 
-let fn = (transform) => {
+let via = (transform) => {
   (resource) => { resource :> andThen(transform) }
 };
 
-let fnError = (wrap) => {
+let viaError = (wrap) => {
   (transform) => {
     (resource) => {
       resource :> andThen((value) => {
@@ -54,8 +54,8 @@ let fnError = (wrap) => {
 };
 
 let carrier = .{
-  fn = fn,
-  fnError = fnError,
+  via = via,
+  viaError = viaError,
   succeed = succeed,
   map = map,
   map2 = map2,
@@ -70,7 +70,7 @@ let resolve = match(resource, pending, failed, ready) => {
   (Ready(value), _, _, _) => { ready(value) },
 };
 
-let withDefault = match(fallback, resource) => {
+let getOr = match(fallback, resource) => {
   (_, Pending) => { fallback },
   (_, Loading) => { fallback },
   (_, Failed(_)) => { fallback },

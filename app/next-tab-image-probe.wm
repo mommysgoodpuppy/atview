@@ -50,7 +50,7 @@ let nearbyImage = (image, size: Geometry.Size) => {
     let second = UiPost(.{ ..text, uri = "below-viewport", text = "body", image = Some(source) }, Resource.Ready(Some(image)), Resource.Ready(None));
     let state = UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", [first, second], [], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
     let tree = Feed.cards(Geometry.rect(split.feed.x, split.feed.y, split.feed.width, split.feed.height * 3), [first, second], 0, FeedLayout(split.feed.width, size, Image.Fit), true);
-    let target = placement(tree) :> Option.withDefault(Placement(0, split.feed, split.feed, Image.Fit, image));
+    let target = placement(tree) :> Option.getOr(Placement(0, split.feed, split.feed, Image.Fit, image));
     expect(target.area.y >= split.feed.y + split.feed.height, "fixture image must start entirely below the paint viewport");
     let _ = Preload.prepare(state, size, None);
     expect(!Host.isIdle(), "image immediately below the viewport must encode before any scroll input");
@@ -75,7 +75,7 @@ let main = () => {
   let size = Geometry.Size(80, 24, 8, 16);
   let split = panes(contentBody(size), size);
   let tree = Feed.cards(split.feed, [item], 0, FeedLayout(split.feed.width, size, Image.Fit), true);
-  let target = placement(tree) :> Option.withDefault(Placement(0, split.feed, split.feed, Image.Fit, image));
+  let target = placement(tree) :> Option.getOr(Placement(0, split.feed, split.feed, Image.Fit, image));
   let _ = Preload.prepare(state, size, None);
   expect(!Host.isIdle(), "inactive adjacent tab must queue real image encoding before activation");
   let _ = Host.deleteAll();

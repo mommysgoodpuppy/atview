@@ -33,7 +33,7 @@ let propertyNumber = (target, name, fallback) => {
     None => { fallback },
     Some(raw) => {
       let decoded: Result<Number, Js.Error> = raw :> Json.assert;
-      decoded :> Result.withDefault(fallback)
+      decoded :> Result.getOr(fallback)
     },
   }
 };
@@ -43,7 +43,7 @@ let sizeNumber = (target: Js.Object, name, fallback) => {
     None => { fallback },
     Some(raw) => {
       let decoded: Result<Number, Js.Error> = raw :> Json.assert;
-      decoded :> Result.withDefault(fallback)
+      decoded :> Result.getOr(fallback)
     },
   }
 };

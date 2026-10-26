@@ -17,7 +17,7 @@ let expect = (condition, label) => {
   if (condition) { void } else { Panic(label) }
 };
 let includes = (text: String, needle: String) => {
-  needle != "" && (text :> .includes(needle) :> Result.withDefault(false))
+  needle != "" && (text :> .includes(needle) :> Result.getOr(false))
 };
 let post = (uri) => {
   UiPost(

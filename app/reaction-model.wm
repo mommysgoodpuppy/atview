@@ -6,7 +6,7 @@ from "../proto/views.wm" import * as Views;
 
 let reactionFor = (feeds: UiFeeds, post: FeedPost) => {
   List.find(feeds.reactions, (reaction) => { reaction.uri == post.uri })
-    :> Option.withDefault(PostReaction(post.uri, post.viewerLike, post.likeCount, false))
+    :> Option.getOr(PostReaction(post.uri, post.viewerLike, post.likeCount, false))
 };
 let applyPosts = (reactions, posts) => {
   posts :> List.map((item: UiPost) => {
@@ -50,7 +50,7 @@ let remember = (state: UiState, reaction: PostReaction) => {
 };
 let completed = (state: UiState, before: PostReaction, viewerLike) => {
   let delta = if (viewerLike == None) { -1 } else { 1 };
-  let count = (before.likeCount :> Option.withDefault(0)) + delta;
+  let count = (before.likeCount :> Option.getOr(0)) + delta;
   remember(state, PostReaction(before.uri, viewerLike, Some(if (count < 0) { 0 } else { count }), false))
 };
 let failed = (state: UiState, before: PostReaction, view, message) => {

@@ -30,7 +30,7 @@ let rec imageArea = match(element, identifier) => {
 };
 let rec metricsArea = match(element) => {
   Ui.Text(area, value, _) => {
-    if (value :> .includes(" likes") :> Result.withDefault(false)) { Some(area) } else { None }
+    if (value :> .includes(" likes") :> Result.getOr(false)) { Some(area) } else { None }
   },
   Ui.Fragment(children) => {
     let rec find = match(elements) => {
@@ -59,8 +59,8 @@ let main = () => {
   let height = Feed.cardHeight(42, size, Image.Fit, item);
   expect(height == 10, "wide-image feed card must shrink to text plus actual media height");
   let card = Feed.card(Geometry.rect(0, 0, 42, height), item, size, Image.Fit, false, 1000, true);
-  let media = imageArea(card, 100000) :> Option.withDefault(Geometry.rect(0, 0, 0, 0));
-  let metrics = metricsArea(card) :> Option.withDefault(Geometry.rect(0, 0, 0, 0));
+  let media = imageArea(card, 100000) :> Option.getOr(Geometry.rect(0, 0, 0, 0));
+  let metrics = metricsArea(card) :> Option.getOr(Geometry.rect(0, 0, 0, 0));
   expect(media.y == 3 && media.height == 5, "feed media must begin directly after text");
   expect(metrics.y == media.y + media.height, "feed metrics must follow the image without empty rows");
   let placed = Kitty.fitPlacement(media, size, wide);
@@ -69,11 +69,11 @@ let main = () => {
   expect(imageArea(hidden, 100000) == None, "scrolling may hide pixels without hiding dimensions");
   let state = UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", [item], [], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
   let movingPosts = postsForState(.{ ..state, scrolling = true });
-  let movingItem = List.at(movingPosts, 0) :> Option.withDefault(item);
+  let movingItem = List.at(movingPosts, 0) :> Option.getOr(item);
   expect(Feed.cardHeight(42, size, Image.Fit, movingItem) == height, "scrolling must preserve measured image height");
   let pane = Thread.threadPane(Geometry.rect(0, 0, 82, 40), state, size);
-  let detailMedia = imageArea(pane, 1) :> Option.withDefault(Geometry.rect(0, 0, 0, 0));
-  let detailMetrics = metricsArea(pane) :> Option.withDefault(Geometry.rect(0, 0, 0, 0));
+  let detailMedia = imageArea(pane, 1) :> Option.getOr(Geometry.rect(0, 0, 0, 0));
+  let detailMetrics = metricsArea(pane) :> Option.getOr(Geometry.rect(0, 0, 0, 0));
   expect(detailMedia.y == 3 && detailMedia.height == 10, "detail pane must use its own width to measure image height");
   expect(detailMetrics.y == detailMedia.y + detailMedia.height, "detail metrics must follow actual image height");
   let movingPane = Thread.threadPane(Geometry.rect(0, 0, 82, 40), .{ ..state, scrolling = true }, size);

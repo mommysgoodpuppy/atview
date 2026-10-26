@@ -27,13 +27,13 @@ examples:
   atview search "workman language" 10`;
 
 let optionString = (fallback, value) => {
-  value :> Option.withDefault(fallback)
+  value :> Option.getOr(fallback)
 };
 
 let optionNumber = (value) => {
   value
     :> Option.map(Text.of)
-    :> Option.withDefault("?")
+    :> Option.getOr("?")
 };
 
 let renderProfile = (profile) => {

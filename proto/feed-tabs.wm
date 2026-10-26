@@ -21,14 +21,14 @@ let rec findPreference = match(preferences, typeName) => {
   },
 };
 let fallbackTitle = (uri: String) => {
-  let parts = uri :> .split("/") :> Result.map(Js.Array.toList) :> Result.withDefault([]);
-  List.at(parts, List.length(parts) - 1) :> Option.withDefault(uri)
+  let parts = uri :> .split("/") :> Result.map(Js.Array.toList) :> Result.getOr([]);
+  List.at(parts, List.length(parts) - 1) :> Option.getOr(uri)
 };
 let decodeItem = (body) => {
   let item: Result<SavedItemWire, Js.Error> = body :> Json.assert;
   Result|item, Boundary.optionalString(body, "type")| :> Result.map((value, kind) => {
     if (value.pinned && (kind == Some("feed") || kind == Some("list"))) {
-      Some(SavedFeed(kind :> Option.withDefault("feed"), value.value, fallbackTitle(value.value)))
+      Some(SavedFeed(kind :> Option.getOr("feed"), value.value, fallbackTitle(value.value)))
     } else { None }
   })
 };
@@ -63,7 +63,7 @@ let decodePreferences = (body) => {
                 let saved: Result<LegacyFeedsWire, Js.Error> = value :> Json.assert;
                 saved :> Result.map((feeds) => {
                   unique(Js.Array.toList(feeds.pinned) :> List.map((uri: String) => {
-                    let isList = uri :> .includes("/app.bsky.graph.list/") :> Result.withDefault(false);
+                    let isList = uri :> .includes("/app.bsky.graph.list/") :> Result.getOr(false);
                     SavedFeed(if (isList) { "list" } else { "feed" }, uri, fallbackTitle(uri))
                   }), [])
                 })
@@ -91,7 +91,7 @@ let hydrateTitle = (jwt, feed: SavedFeed) => {
           :> Result.mapErr(Xrpc.ResponseShapeFailure) :> Task.fromResult
       })
   };
-  request :> Task.map((title) => { SavedFeed(feed.kind, feed.uri, title :> Option.withDefault(feed.title)) })
+  request :> Task.map((title) => { SavedFeed(feed.kind, feed.uri, title :> Option.getOr(feed.title)) })
     :> Task.recover((_) => { feed })
 };
 let pinnedFeeds = (jwt) => {

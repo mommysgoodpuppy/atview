@@ -47,7 +47,7 @@ let feedPost = (post) => {
     post.text,
     post.createdAt,
     post.author.handle,
-    post.author.displayName :> Option.withDefault(post.author.handle),
+    post.author.displayName :> Option.getOr(post.author.handle),
     post.replyCount,
     post.repostCount,
     post.likeCount,

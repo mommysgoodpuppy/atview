@@ -48,9 +48,9 @@ let rec fillRow = (bytes, y, x) => {
   } else {
     let offset = (y * side + x) * 3;
     let (red, green, blue) = quadrant(y, x);
-    let _ = bytes :> .writeUInt8(red, offset) :> Result.withDefault(0);
-    let _ = bytes :> .writeUInt8(green, offset + 1) :> Result.withDefault(0);
-    let _ = bytes :> .writeUInt8(blue, offset + 2) :> Result.withDefault(0);
+    let _ = bytes :> .writeUInt8(red, offset) :> Result.getOr(0);
+    let _ = bytes :> .writeUInt8(green, offset + 1) :> Result.getOr(0);
+    let _ = bytes :> .writeUInt8(blue, offset + 2) :> Result.getOr(0);
     fillRow(bytes, y, x + 1)
   }
 };

@@ -73,7 +73,7 @@ let layoutReply = (area, size, cursor, avatar) => {
 
 let replyPost = (area, cursor, layout: ReplyLayout, post, avatar) => {
   let name = post.author.displayName
-    :> Option.withDefault(post.author.handle);
+    :> Option.getOr(post.author.handle);
   let lines = postLines(
     post.text,
     Geometry.nonNegative(layout.textWidth - 2),

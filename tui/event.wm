@@ -37,11 +37,11 @@ let backspace = fromCharCode(127);
 let escape = Ansi.esc;
 
 let drop = (text, count) => {
-  text :> .slice(count) :> Result.withDefault("")
+  text :> .slice(count) :> Result.getOr("")
 };
 
 let first = (text) => {
-  text :> .slice(0, 1) :> Result.withDefault("")
+  text :> .slice(0, 1) :> Result.getOr("")
 };
 
 -- Workman follows its JS-oriented String model and intentionally has no

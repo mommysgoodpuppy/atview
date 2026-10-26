@@ -4,7 +4,7 @@ from "./draw.wm" import * as Draw;
 from "./scroll.wm" import * as Scroll;
 
 let tabWidth = (label: String, available) => {
-  let length = Draw.safeText(label) :> .length :> Result.withDefault(0);
+  let length = Draw.safeText(label) :> .length :> Result.getOr(0);
   Geometry.clamp(0, available, Geometry.clamp(3, 32, length + 2))
 };
 let rec fitCount = match(labels, available, remaining) => {
@@ -53,7 +53,7 @@ let renderAt = (area: Geometry.Rect, labels, selected, offset) => {
   };
   if (area.width < 12) {
     Draw.fill(area, " ", Draw.status) ++
-      Draw.ellipsizedText(area, List.at(labels, selected) :> Option.withDefault(""), Draw.accent)
+      Draw.ellipsizedText(area, List.at(labels, selected) :> Option.getOr(""), Draw.accent)
   } else {
     Draw.fill(area, " ", Draw.status) ++
       Draw.text(Geometry.rect(area.x, area.y, 4, 1), "u ‹ ", Draw.muted) ++

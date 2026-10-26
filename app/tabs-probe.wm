@@ -90,7 +90,7 @@ let main = () => {
   expect(compactStart == 0 && compactCount == 6, "short tab labels must fit without fixed-width gaps");
   expect(TabBar.tabWidth("One", 72) == 5, "tab width must follow label length");
   let bar = renderTabs(cached, Geometry.Size(80, 30, 8, 16));
-  expect(bar :> .includes("[Following]") :> Result.withDefault(false), "tab strip must identify active feed");
+  expect(bar :> .includes("[Following]") :> Result.getOr(false), "tab strip must identify active feed");
   let size = Geometry.Size(40, 30, 8, 16);
   let first = Render.render(None, .{ ..cached, scrollRows = 100 }, size);
   let switched = Render.render(Some(first.memory), switchTabState(.{ ..cached, scrollRows = 100 }, OwnPosts), size);

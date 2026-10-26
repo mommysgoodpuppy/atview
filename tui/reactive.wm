@@ -102,23 +102,23 @@ let andThen = (reactive, transform) => {
   })
 };
 
-let fn = (transform) => {
+let via = (transform) => {
   (reactive) => {
     reactive :> andThen(transform)
   }
 };
 
-let fnError = (_) => {
+let viaError = (_) => {
   (transform) => {
-    fn(transform)
+    via(transform)
   }
 };
 
 let mapErr = (reactive, _) => {reactive};
 
 let carrier = .{
-  fn = fn,
-  fnError = fnError,
+  via = via,
+  viaError = viaError,
   succeed = succeed,
   map = map,
   map2 = map2,

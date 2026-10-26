@@ -6,7 +6,7 @@ from js.global("String") import {
   fromCharCode: Number -> String,
 };
 
-let controlC = fromCharCode(3) :> Result.withDefault("");
+let controlC = fromCharCode(3) :> Result.getOr("");
 
 let input =
   Ansi.esc ++ "[A" ++

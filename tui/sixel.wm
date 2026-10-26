@@ -203,7 +203,7 @@ let buildIndexed = (pixels: Png.Pixels, target: Target) => {
               };
               let _ = indexed
                 :> .writeUInt8(index, y * target.width + x)
-                :> Result.withDefault(0);
+                :> Result.getOr(0);
               columns(x + 1)
             }
           };
@@ -228,7 +228,7 @@ let usedColors = (indexed, count) => {
         } else {
           let value = Png.byte(indexed, index);
           let _ = if (value < transparentIndex) {
-            seen :> .writeUInt8(1, value) :> Result.withDefault(0)
+            seen :> .writeUInt8(1, value) :> Result.getOr(0)
           } else {
             0
           };
@@ -321,10 +321,10 @@ let bandData = (indexed, width, height, y0) => {
                       let mask = Png.byte(masks, offset) + Byte.bit(dy);
                       let _ = masks
                         :> .writeUInt8(mask, offset)
-                        :> Result.withDefault(0);
+                        :> Result.getOr(0);
                       present
                         :> .writeUInt32LE(x + 1, value * 4)
-                        :> Result.withDefault(0)
+                        :> Result.getOr(0)
                     } else {
                       0
                     }
@@ -343,7 +343,7 @@ let bandData = (indexed, width, height, y0) => {
             if (color >= paletteSize) {
               acc
             } else {
-              let extent = present :> .readUInt32LE(color * 4) :> Result.withDefault(0);
+              let extent = present :> .readUInt32LE(color * 4) :> Result.getOr(0);
               if (extent > 0) {
                 emit(
                   color + 1,

@@ -49,7 +49,7 @@ let encode = (request: Request) => {
     }
   }) :> Task.recover((_) => { ("", []: List<String>) }) :> Task.map((prepared) => {
     let (output, rows) = prepared;
-    postMessage(JSON{ token: request.token, output: output, rows: Js.Array.fromList(rows) }) :> Result.withDefault(void)
+    postMessage(JSON{ token: request.token, output: output, rows: Js.Array.fromList(rows) }) :> Result.getOr(void)
   })
 };
 

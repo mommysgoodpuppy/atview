@@ -20,10 +20,10 @@ let make = (version, _) => {
     sources = [Repository.source("atview.tar")],
     install = [builder],
     requires = []
-  }: Package
+  }
 };
 
-let definition: Definition = .{
+let definition = .{
   name = "atview",
   description = "AT Protocol terminal client written in Workman",
   homepage = "https://github.com/mommysgoodpuppy/atview",
@@ -32,8 +32,8 @@ let definition: Definition = .{
   scope = User,
   versions = Repository.versions,
   hosts = [],
-  -- This development package follows the selected source snapshot. WM and
-  -- Deno retain their release age policies independently.
+  // This development package follows the selected source snapshot. WM and
+  // Deno retain their release age policies independently.
   policy = .{ ..defaultPolicy, channel = "source", minAgeDays = 0 },
   make
 };

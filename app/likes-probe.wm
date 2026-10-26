@@ -26,9 +26,9 @@ record LikeRecord = { subject: Subject, createdAt: String };
 record CreateBody = { repo: String, collection: String, record: LikeRecord };
 record DeleteBody = { repo: String, collection: String, rkey: String };
 let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
-let contains = (value: String, text: String) => { value :> .includes(text) :> Result.withDefault(false) };
+let contains = (value: String, text: String) => { value :> .includes(text) :> Result.getOr(false) };
 let selected = (state: UiState) => {
-  List.at(postsForState(state), state.selected) :> Option.withDefault(UiPost(Api.FeedPost("", "", "", "", "", None, None, None, None, None, "", None), Resource.Ready(None), Resource.Ready(None)))
+  List.at(postsForState(state), state.selected) :> Option.getOr(UiPost(Api.FeedPost("", "", "", "", "", None, None, None, None, None, "", None), Resource.Ready(None), Resource.Ready(None)))
 };
 let settle = (step) => {
   match(step) {

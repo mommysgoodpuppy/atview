@@ -20,7 +20,7 @@ let animated = (state: UiState) => {
     _ => { Panic("expected animation clock") },
   }
 };
-let includes = (value: String, text: String) => { value :> .includes(text) :> Result.withDefault(false) };
+let includes = (value: String, text: String) => { value :> .includes(text) :> Result.getOr(false) };
 let main = () => {
   let vertical = Scroll.Strip([6, 5, 9], 10, 1);
   expect(Scroll.reveal(vertical, 1, 0) == 0, "visible timeline selection must not move viewport");

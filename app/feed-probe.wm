@@ -67,7 +67,7 @@ let main = () => {
   let height = cardHeight(11, size, Image.Fit, item);
   expect(height == 4 + List.length(lines), "card height must include every text row");
   let output = renderCards(Geometry.rect(0, 0, 11, height), [item], 0, FeedLayout(11, size, Image.Fit));
-  expect(output :> .includes("END") :> Result.withDefault(false), "card must draw final text row");
+  expect(output :> .includes("END") :> Result.getOr(false), "card must draw final text row");
   let posts = [post("1", "one"), post("2", "two"), post("3", "three"), post("4", "four"), post("5", "five"), post("6", "six")];
   let state = UiState(0, Timeline, Image.Fit, makeUiFeeds("test", "did:test", "", posts, [], None, None), false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
   let plan = Preload.plan(None, state, size);

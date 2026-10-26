@@ -55,17 +55,17 @@ let map2 = (left, right, combine) => {
   })
 };
 
-let fn = (transform) => {
+let via = (transform) => {
   (benchmark) => { benchmark :> andThen(transform) }
 };
 
-let fnError = (_) => {
-  (transform) => { fn(transform) }
+let viaError = (_) => {
+  (transform) => { via(transform) }
 };
 
 let carrier = .{
-  fn = fn,
-  fnError = fnError,
+  via = via,
+  viaError = viaError,
   succeed = succeed,
   map = map,
   map2 = map2,
@@ -121,12 +121,12 @@ let median = (sorted, size) => {
   if (size <= 0) {
     0
   } else {
-    let half = floor(size / 2) :> Result.withDefault(0);
+    let half = floor(size / 2) :> Result.getOr(0);
     if (size - half * 2 == 0) {
       let right = half;
       (at(sorted, right - 1) + at(sorted, right)) / 2
     } else {
-      at(sorted, floor(size / 2) :> Result.withDefault(0))
+      at(sorted, floor(size / 2) :> Result.getOr(0))
     }
   }
 };
@@ -211,7 +211,7 @@ let run = (benchmark) => {
 };
 
 let fixed = (value, digits) => {
-  value :> .toFixed(digits) :> Result.withDefault("?")
+  value :> .toFixed(digits) :> Result.getOr("?")
 };
 
 let formatReport = (report: Report) => {

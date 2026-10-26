@@ -87,7 +87,7 @@ let tabFor = (feeds: UiFeeds, view) => {
   List.find(feeds.tabs, (tab) => { sameView(tab.view, view) })
 };
 let tabValue = (feeds: UiFeeds, view) => {
-  tabFor(feeds, view) :> Option.withDefault(emptyTab(view, "Feed"))
+  tabFor(feeds, view) :> Option.getOr(emptyTab(view, "Feed"))
 };
 let modifyTab = (feeds: UiFeeds, view, transform) => {
   .{ ..feeds, preloadVersion = feeds.preloadVersion + 1, tabs = feeds.tabs :> List.map((tab) => {
@@ -254,11 +254,11 @@ let panes = (body, size) => {
 };
 
 let mediaValue = (resource) => {
-  Resource.withDefault(None, resource)
+  Resource.getOr(None, resource)
 };
 
 let countText = (value) => {
-  value :> Option.map(Text.of) :> Option.withDefault("0")
+  value :> Option.map(Text.of) :> Option.getOr("0")
 };
 
 let move = (count, delta, state) => {

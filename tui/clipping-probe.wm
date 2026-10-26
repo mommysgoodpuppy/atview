@@ -8,7 +8,7 @@ from "./tabs.wm" import * as Tabs;
 
 let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
 let contains = (value: String, text: String) => {
-  value :> .includes(text) :> Result.withDefault(false)
+  value :> .includes(text) :> Result.getOr(false)
 };
 let main = () => {
   expect(Draw.textSlice("abcdef", 0, 4, "..") == "ab..", "right overflow must preserve text and indicate continuation");

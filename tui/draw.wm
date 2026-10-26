@@ -68,12 +68,12 @@ let repeat = (text, count) => {
   if (count <= 0) {
     ""
   } else {
-    text :> .repeat(count) :> Result.withDefault("")
+    text :> .repeat(count) :> Result.getOr("")
   }
 };
 
 let replace = (text, needle, replacement) => {
-  text :> .replaceAll(needle, replacement) :> Result.withDefault(text)
+  text :> .replaceAll(needle, replacement) :> Result.getOr(text)
 };
 
 -- Terminal content is untrusted (post text, handles, server errors). Keep
@@ -127,14 +127,14 @@ let text = (area, value, style) => {
 -- clipped output always stays inside the available width (even at width one).
 let textSlice = (value, offset, width, marker) => {
   let cleaned = safeText(value);
-  let size = cleaned :> .length :> Result.withDefault(0);
+  let size = cleaned :> .length :> Result.getOr(0);
   let start = Geometry.nonNegative(offset);
   if (width <= 0 || start >= size) { "" } else {
     let prefix = if (start > 0) { truncate(marker, width) } else { "" };
-    let prefixWidth = prefix :> .length :> Result.withDefault(0);
+    let prefixWidth = prefix :> .length :> Result.getOr(0);
     let suffix = if (size > start + width) { truncate(marker, width - prefixWidth) } else { "" };
-    let suffixWidth = suffix :> .length :> Result.withDefault(0);
-    let content = cleaned :> .slice(start + prefixWidth, start + width - suffixWidth) :> Result.withDefault("");
+    let suffixWidth = suffix :> .length :> Result.getOr(0);
+    let content = cleaned :> .slice(start + prefixWidth, start + width - suffixWidth) :> Result.getOr("");
     prefix ++ content ++ suffix
   }
 };
@@ -185,7 +185,7 @@ let boxWithEdges = (area, title, active, edges: BoxEdges) => {
     } else {
       truncate(" " ++ title ++ " ", inside)
     };
-    let remainingTop = inside - (titleText :> .length :> Result.withDefault(0));
+    let remainingTop = inside - (titleText :> .length :> Result.getOr(0));
     let top = edges.topLeft ++ titleText ++
       repeat("─", remainingTop) ++ edges.topRight;
     let bottom = edges.bottomLeft ++ repeat("─", inside) ++ edges.bottomRight;

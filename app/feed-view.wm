@@ -13,24 +13,24 @@ from "../tui/image.wm" import * as Image;
 from "../tui/resource.wm" import * as Resource;
 
 let wrapOnce = (text, width) => {
-  let size = text :> .length :> Result.withDefault(0);
-  let newline = text :> .indexOf("\n") :> Result.withDefault(-1);
+  let size = text :> .length :> Result.getOr(0);
+  let newline = text :> .indexOf("\n") :> Result.getOr(-1);
   if (newline >= 0 && (width <= 0 || newline <= width)) {
     (
-      text :> .slice(0, newline) :> Result.withDefault(""),
-      text :> .slice(newline + 1) :> Result.withDefault(""),
+      text :> .slice(0, newline) :> Result.getOr(""),
+      text :> .slice(newline + 1) :> Result.getOr(""),
     )
   } else {
     if (width <= 0 || size <= width) {
       (text, "")
     } else {
-      let candidate = text :> .slice(0, width + 1) :> Result.withDefault(text);
-      let space = candidate :> .lastIndexOf(" ") :> Result.withDefault(-1);
+      let candidate = text :> .slice(0, width + 1) :> Result.getOr(text);
+      let space = candidate :> .lastIndexOf(" ") :> Result.getOr(-1);
       let boundary = if (space <= 0) { width } else { space };
       let next = if (space <= 0) { boundary } else { boundary + 1 };
       (
-        text :> .slice(0, boundary) :> Result.withDefault(""),
-        text :> .slice(next) :> Result.withDefault(""),
+        text :> .slice(0, boundary) :> Result.getOr(""),
+        text :> .slice(next) :> Result.getOr(""),
       )
     }
   }
@@ -48,7 +48,7 @@ let rec wrapLines = match(text, width, remaining) => {
 
 -- The text length bounds the number of rows even at a one-column width.
 let postLines = (text, width) => {
-  wrapLines(text, width, (text :> .length :> Result.withDefault(0)) + 1)
+  wrapLines(text, width, (text :> .length :> Result.getOr(0)) + 1)
 };
 
 let rec indentation = (depth) => {

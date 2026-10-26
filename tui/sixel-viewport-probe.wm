@@ -29,8 +29,8 @@ let main = () => {
   };
   fill(0);
   let pixels = Png.Pixels(bytes, 10, 18);
-  let original = Sixel.buildIndexed(pixels, Sixel.placement(area, size, Image.Fill, pixels)) :> Option.withDefault(bytes);
-  let cropped = Sixel.buildIndexed(pixels, target) :> Option.withDefault(bytes);
+  let original = Sixel.buildIndexed(pixels, Sixel.placement(area, size, Image.Fill, pixels)) :> Option.getOr(bytes);
+  let cropped = Sixel.buildIndexed(pixels, target) :> Option.getOr(bytes);
   let rec check = (index) => {
     if (index >= 54) { void } else {
       let y = floor(index / 6);

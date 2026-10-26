@@ -42,10 +42,10 @@ let deleteImage = (identifier) => {
   }
 };
 let rec transmitChunks = (remaining, first, placement, identifier) => {
-  let size = remaining :> .length :> Result.withDefault(0);
+  let size = remaining :> .length :> Result.getOr(0);
   let more = size > 4096;
-  let chunk = remaining :> .slice(0, 4096) :> Result.withDefault("");
-  let rest = remaining :> .slice(4096) :> Result.withDefault("");
+  let chunk = remaining :> .slice(0, 4096) :> Result.getOr("");
+  let rest = remaining :> .slice(4096) :> Result.getOr("");
   let continuation = if (more) { "1" } else { "0" };
   let control = if (first) {
     `a=T,f=100,q=2,C=1,${
@@ -203,7 +203,7 @@ let pngUrl = (url) => {
         Ok(`${url}@png`)
       }
     }
-  }) :> Result.withDefault(url)
+  }) :> Result.getOr(url)
 };
 
 let loadPngWithPixels = (url, alt, decodePixels) => {
@@ -277,13 +277,13 @@ let load = (source: PostImage) => {
 let loadAvatar = (url) => {
   let thumbnail = url
     :> .replace("/img/avatar/plain/", "/img/avatar_thumbnail/plain/")
-    :> Result.withDefault(url);
+    :> Result.getOr(url);
   loadPng(thumbnail, "")
 };
 
 let loadEncodedAvatar = (url) => {
   let thumbnail = url
     :> .replace("/img/avatar/plain/", "/img/avatar_thumbnail/plain/")
-    :> Result.withDefault(url);
+    :> Result.getOr(url);
   loadPngWithPixels(thumbnail, "", false)
 };

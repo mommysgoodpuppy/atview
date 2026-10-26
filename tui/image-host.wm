@@ -50,7 +50,7 @@ type Host = Disabled | Enabled<Session>;
 let holder = JSON{};
 let read = () => {
   let stored: Result<Host, Js.Error> = get(holder, "session") :> Result.andThen(Json.assert);
-  stored :> Result.withDefault(Disabled)
+  stored :> Result.getOr(Disabled)
 };
 let save = (host) => {
   let source = Js.Array.fromList([host]);
@@ -116,7 +116,7 @@ let rec pump = () => {
                 warming = withoutToken(session.warming, job.token) };
               if (job.warm || wanted(session.wanted, job.token)) {
                 save(Enabled(.{ ..next, busy = Some(job) }));
-                session.worker :> .postMessage(job.payload) :> Result.withDefault(void)
+                session.worker :> .postMessage(job.payload) :> Result.getOr(void)
               } else { save(Enabled(next)); pump() }
             },
           }
@@ -159,8 +159,8 @@ let start = (write) => {
           save(Enabled(Session(worker, write, 1, None, [], [], [], [])));
           worker :> .addEventListener("message", (event) => {
             let reply: Result<Reply, Js.Error> = get(event, "data") :> Result.andThen(Json.assert);
-            reply :> Result.map(accept) :> Result.withDefault(void)
-          }) :> Result.withDefault(void)
+            reply :> Result.map(accept) :> Result.getOr(void)
+          }) :> Result.getOr(void)
         },
       }
     },
@@ -171,7 +171,7 @@ let stop = () => {
     Disabled => { void },
     Enabled(session) => {
       save(Disabled);
-      session.worker :> .terminate() :> Result.withDefault(void)
+      session.worker :> .terminate() :> Result.getOr(void)
     },
   }
 };
