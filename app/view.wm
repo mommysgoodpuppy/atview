@@ -60,11 +60,12 @@ let rec renderBorderAt = match(area, posts, request) => {
     match(posts) {
       [] => { "" },
       [item, ..tail] => {
-        let height = cardHeight(
+        let height = cardHeightMode(
           area.width,
           request.layout.size,
           request.layout.scale,
           item,
+          request.layout.thumbnail,
         );
         if (area.height < 2) {
           ""
@@ -136,7 +137,7 @@ let renderViewportAt = (
   );
   let visible = List.drop(posts, start);
   let cursor = CardCursor(state.selected, start);
-  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  let layout = feedLayout(split.feed.width, size, state);
   Ansi.beginSynchronizedUpdate ++ Draw.beginFrame ++ ImageHost.deleteAll() ++
     renderCardsVisible(feedArea, visible, start, layout, !state.scrolling || Cap.renderer == Cap.SixelRenderer) ++
     renderBorderAt(
@@ -159,7 +160,7 @@ let renderFull = (state: UiState, size: Geometry.Size) => {
   let posts = postsForState(state);
   let body = contentBody(size);
   let split = panes(body, size);
-  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  let layout = feedLayout(split.feed.width, size, state);
   let strip = Scroll.Strip(cardHeights(posts, layout), split.feed.height, 1);
   let viewport = Scroll.locateAxis(strip, Scroll.reveal(strip, state.selected, 0));
   renderViewport(state, size, viewport.start, viewport.inset)
@@ -174,7 +175,7 @@ let renderFeedMedia = (state: UiState, size: Geometry.Size, start, inset, showIm
     Geometry.rect(split.feed.x, split.feed.y - inset, split.feed.width, split.feed.height + inset),
     visible,
     start,
-    FeedLayout(split.feed.width, size, state.imageScale),
+    feedLayout(split.feed.width, size, state),
     showImages,
   )
 };
@@ -193,7 +194,7 @@ let renderSelectionOutline = (
   let split = panes(body, size);
   let visible = List.drop(posts, start);
   let cursor = CardCursor(state.selected, start);
-  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  let layout = feedLayout(split.feed.width, size, state);
   renderBorderAt(
     Geometry.rect(split.feed.x, split.feed.y - inset, split.feed.width, split.feed.height + inset),
     visible,
@@ -217,6 +218,6 @@ let renderThreadRegion = (state: UiState, size: Geometry.Size) => {
 let renderReactions = (state: UiState, size: Geometry.Size, start, inset) => {
   let split = panes(contentBody(size), size);
   let area = Geometry.rect(split.feed.x, split.feed.y - inset, split.feed.width, split.feed.height + inset);
-  renderMetrics(area, List.drop(postsForState(state), start), FeedLayout(split.feed.width, size, state.imageScale)) ++
+  renderMetrics(area, List.drop(postsForState(state), start), feedLayout(split.feed.width, size, state)) ++
     (if (split.thread.width > 0) { renderThreadReactions(split.thread, state, size) } else { "" })
 };

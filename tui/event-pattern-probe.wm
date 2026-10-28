@@ -3,7 +3,7 @@
 from "./ansi.wm" import * as Ansi;
 from "./event.wm" import * as Event;
 from js.global("String") import {
-  fromCharCode: Number -> String,
+  fromCharCode,
 };
 
 let controlC = fromCharCode(3) :> Result.getOr("");
@@ -21,6 +21,10 @@ let input =
   Ansi.esc ++ "[6;20;10t" ++
   Ansi.esc ++ "[<64;10;5M" ++
   Ansi.esc ++ "[<65;10;5M" ++
+  Ansi.esc ++ "[<0;10;5M" ++
+  Ansi.esc ++ "[<0;10;5m" ++
+  Ansi.esc ++ "[<2;10;5M" ++
+  Ansi.esc ++ "[<32;10;5M" ++
   "x" ++ controlC;
 
 let expected = match(events) => {
@@ -37,6 +41,10 @@ let expected = match(events) => {
     Event.CellSize(10, 20),
     Event.WheelUp,
     Event.WheelDown,
+    Event.Click(9, 4),
+    Event.Unknown("mouse"),
+    Event.Unknown("mouse"),
+    Event.Unknown("mouse"),
     Event.Character("x"),
     Event.CtrlC
   ] => { true },
@@ -47,6 +55,6 @@ let main = () => {
   if (expected(Event.decodeMany(input))) {
     print("event prefix patterns ok")
   } else {
-    print("event prefix patterns failed")
+    Panic("event prefix patterns failed")
   }
 };

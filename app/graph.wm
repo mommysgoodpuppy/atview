@@ -3,8 +3,8 @@
 from "./data.wm" import { loadUiThread, withThread };
 from "./model.wm" import *;
 from "./reaction-model.wm" import * as Reaction;
-from "../proto/api.wm" import { FeedPost, threadAuthenticated };
-from "../proto/xrpc.wm" import { AppError, describeError };
+from "../proto/api.wm" import { threadAuthenticated };
+from "../proto/xrpc.wm" import { describeError };
 from "../tui/command.wm" import * as Command;
 from "../util/list.wm" import * as ListExtra;
 

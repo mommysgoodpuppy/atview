@@ -53,7 +53,7 @@ let main = () => {
   let longJump = .{ ..initial.memory, model = .{ ..initial.memory.model, scrollOffset = 0, scrollTarget = 10000 } };
   expect(Preload.needsPreparation(Some(longJump), .{ ..state, scrolling = true, scrollFrame = 1 }, size), "large jumps must keep warming the path between separate prepared windows");
   let split = panes(contentBody(size), size);
-  let layout = FeedLayout(split.feed.width, size, Image.Fit);
+  let layout = FeedLayout(false, split.feed.width, size, Image.Fit);
   let heights = Feed.cardHeights(postsFor(state.feeds, Timeline), layout);
   let offset = Scroll.itemOffset(heights, 16, 1);
   let old = initial.memory;

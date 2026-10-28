@@ -1,0 +1,21 @@
+from "./config.wm" import * as Config;
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let invalid = (text) => { match(Config.parse(text)) { Err(_) => { true }, Ok(_) => { false } } };
+let parses = (source, expected) => { match(Config.parse(source)) { Ok(settings) => { settings == expected }, Err(_) => { false } } };
+let main = () => {
+  expect(parses("{ timelineThumbnailMode = true }", Config.Settings(true)), "enable thumbnail mode");
+  expect(parses("{ timelineThumbnailMode = false }", Config.defaults), "disable thumbnail mode");
+  expect(parses("{}", Config.defaults), "missing setting uses default");
+  expect(parses("{ label = \"日本語 🖼\" timelineThumbnailMode = true }", Config.Settings(true)), "WON text must be UTF-8 encoded");
+  expect(invalid("{ timelineThumbnailMode = \"true\" }"), "reject text boolean");
+  expect(invalid("{ timelineThumbnailMode = null }"), "reject null boolean");
+  expect(invalid("{ timelineThumbnailMode ="), "reject malformed WON");
+  expect(invalid("true"), "require a record root");
+  Config.loadAt("app/atview-nonexistent-config-probe.won") :> Task.andThen((settings) => {
+    expect(settings == Config.defaults, "missing config file uses defaults");
+    Config.loadAt("atview.example.won") :> Task.map((example) => {
+      expect(example == Config.Settings(true), "load real WON file");
+      print("config probe: ok")
+    })
+  })
+};

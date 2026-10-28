@@ -19,6 +19,7 @@ type Key =
   | ShiftTab
   | PageUp
   | PageDown
+  | Click<Number, Number>
   | WheelUp
   | WheelDown
   | Home
@@ -70,7 +71,7 @@ let digit = match(character) => {
   _ => { None },
 };
 
-let rec positiveUntil = (
+let rec numberUntil = (
   input,
   delimiter: String,
   value,
@@ -80,7 +81,7 @@ let rec positiveUntil = (
     [] => { InvalidNumberPrefix },
     [character, ..rest] => {
       if (character == delimiter) {
-        if (seen && value > 0) {
+        if (seen) {
           NumberPrefix(value, rest)
         } else {
           InvalidNumberPrefix
@@ -89,11 +90,20 @@ let rec positiveUntil = (
         match(digit(character)) {
           None => { InvalidNumberPrefix },
           Some(next) => {
-            positiveUntil(rest, delimiter, value * 10 + next, true)
+            numberUntil(rest, delimiter, value * 10 + next, true)
           },
         }
       }
     },
+  }
+};
+
+let positiveUntil = (input, delimiter, value, seen) => {
+  match(numberUntil(input, delimiter, value, seen)) {
+    NumberPrefix(number, rest) => {
+      if (number > 0) { NumberPrefix(number, rest) } else { InvalidNumberPrefix }
+    },
+    InvalidNumberPrefix => { InvalidNumberPrefix },
   }
 };
 
@@ -103,7 +113,7 @@ let rec positiveUntilMouseEnd = (input, value, seen) => {
     [character, ..rest] => {
       if (character == "M" || character == "m") {
         if (seen && value > 0) {
-          NumberPrefix(value, rest)
+          NumberPrefix(value, [character, ..rest])
         } else {
           InvalidNumberPrefix
         }
@@ -138,23 +148,26 @@ let cellSizePrefix = match(input) => {
 
 let mousePrefix = match(input) => {
   [escape, "[", "<", ..rest] => {
-    match(positiveUntil(rest, ";", 0, false)) {
+    match(numberUntil(rest, ";", 0, false)) {
       InvalidNumberPrefix => { None },
       NumberPrefix(button, afterButton) => {
         match(positiveUntil(afterButton, ";", 0, false)) {
           InvalidNumberPrefix => { None },
-          NumberPrefix(_, afterColumn) => {
+          NumberPrefix(column, afterColumn) => {
             match(positiveUntilMouseEnd(afterColumn, 0, false)) {
               InvalidNumberPrefix => { None },
-              NumberPrefix(_, afterRow) => {
-                if (button == 64) {
-                  Some((WheelUp, afterRow))
-                } else {
-                  if (button == 65) {
-                    Some((WheelDown, afterRow))
-                  } else {
-                    Some((Unknown("mouse"), afterRow))
-                  }
+              NumberPrefix(row, ending) => {
+                match(ending) {
+                  ["M", ..afterRow] => {
+                    let event = if (button == 0) { Click(column - 1, row - 1) } else {
+                      if (button == 64) { WheelUp } else {
+                        if (button == 65) { WheelDown } else { Unknown("mouse") }
+                      }
+                    };
+                    Some((event, afterRow))
+                  },
+                  ["m", ..afterRow] => { Some((Unknown("mouse"), afterRow)) },
+                  _ => { None },
                 }
               },
             }

@@ -1,0 +1,40 @@
+from "basis/won.wm" import * as Won;
+from "basis/text.wm" import * as Utf8;
+from "basis/string.wm" import * as Bytes;
+from "../proto/xrpc.wm" import * as Xrpc;
+from js.global("Deno") import { readTextFile };
+from js.module("node:fs") import { existsSync };
+
+record Settings = { timelineThumbnailMode: Bool };
+let defaults = Settings(false);
+let path = "atview.won";
+let parse = (source) => {
+  Utf8.toUtf8(source) :> Result.mapErr((_) => { "invalid UTF-8 text" })
+    :> Result.andThen((bytes) => { Bytes.toNative(bytes) :> Result.mapErr((_) => { "invalid UTF-8 bytes" }) })
+    :> Result.andThen((bytes) => {
+      let document = Won.read(bytes);
+      Won.entries(document) :> Result.andThen((_) => {
+        Won.optional(Won.get(document, "timelineThumbnailMode")) :> Result.andThen((field) => {
+          match(field) {
+            None => { Ok(defaults) },
+            Some(node) => { Won.boolean(Ok(node)) :> Result.map(Settings) },
+          }
+        })
+      }) :> Result.mapErr(Won.problemText)
+    })
+};
+
+let load = () => { 
+  let loadAt = (path) => {
+    match(existsSync(path)) {
+      Ok(false) => { Task.succeed(defaults) },
+      Ok(true) => {
+        readTextFile(path) :> Task.mapErr(Xrpc.JavaScriptFailure) :> Task.andThen((source) => {
+          parse(source) :> Result.mapErr((reason) => { Xrpc.ConfigFailure(path ++ ": " ++ reason) }) :> Task.fromResult
+        })
+      },
+      Err(_) => { Panic("unreachable") }
+    }
+  };
+  loadAt(path) 
+};

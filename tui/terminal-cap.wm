@@ -41,12 +41,14 @@ let nonEmpty = (value) => {
 let supportsKittyGraphics = () => {
   let term = envString("TERM");
   let termProgram = envString("TERM_PROGRAM");
+
   nonEmpty(envString("KITTY_WINDOW_ID")) ||
   nonEmpty(envString("GHOSTTY_RESOURCES_DIR")) ||
   nonEmpty(envString("WEZTERM_EXECUTABLE")) ||
   termProgram == "ghostty" ||
   termProgram == "WezTerm" ||
   termProgram == "konsole" ||
+  termProgram == "vscode" ||
   textIncludes(term, "kitty") ||
   textIncludes(term, "ghostty") ||
   textIncludes(term, "wezterm")

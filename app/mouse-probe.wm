@@ -1,0 +1,38 @@
+-- Offline mouse targeting, including scroll offsets and shared borders.
+from "./model.wm" import *;
+from "./update.wm" import { hitExtent, updateStateAt };
+from "../tui/ansi.wm" import * as Ansi;
+from "../tui/command.wm" import * as Command;
+from "../tui/event.wm" import * as Event;
+from "../tui/geometry.wm" import * as Geometry;
+from "../tui/image.wm" import * as Image;
+from "../tui/scroll.wm" import * as Scroll;
+
+let expect = (condition, label) => {
+  if (condition) { void } else { Panic(label) }
+};
+let stateOf = match(step) => {
+  Command.Continue(state) => { state },
+  Command.Spawn(state, _) => { state },
+  Command.SpawnMany(state, _) => { state },
+  Command.Await(state, _) => { state },
+  Command.Quit => { Panic("mouse must not quit") },
+};
+let main = () => {
+  expect(hitExtent([8, 8, 8], 7, 1, 0) == Some(1), "shared border targets next card");
+  expect(hitExtent([8, 8, 8], 21, 1, 0) == Some(2), "last card bottom border is clickable");
+  expect(hitExtent([8, 8, 8], 22, 1, 0) == None, "blank rows are not cards");
+  expect(hitExtent([11, 10, 12], 14, 0, 0) == Some(1), "scrolled tabs use content coordinates");
+  let feeds = makeUiFeeds("test", "did:test", "", [], [], None, None);
+  let state = UiState(0, Timeline, Image.Fit, feeds, false, "", 0, ThreadLoading(""), [], false, 0, 0, 0);
+  let painted = RenderModel(state, Geometry.Size(80, 24, 8, 16), 0, 0, 0, 0, Scroll.Motion(0, 0));
+  let own = stateOf(updateStateAt(Event.Click(16, 0), state, painted));
+  expect(sameView(own.view, OwnPosts), "click My posts tab");
+  let blank = stateOf(updateStateAt(Event.Click(40, 0), state, painted));
+  expect(sameView(blank.view, Timeline), "blank tab strip does not navigate");
+  let footer = stateOf(updateStateAt(Event.Click(16, 23), state, painted));
+  expect(sameView(footer.view, Timeline), "footer click does not navigate");
+  let release = Event.decodeMany(Ansi.esc ++ "[<0;16;1m");
+  expect(release == [Event.Unknown("mouse")], "release is never a keyboard shortcut");
+  print("mouse targeting ok")
+};

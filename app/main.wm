@@ -2,6 +2,7 @@
 -- Authenticates, loads the configured account's home timeline and author feed
 -- directly over XRPC, then browses them without exposing credentials or tokens.
 
+from "./config.wm" import * as Config;
 from "../proto/api.wm" import { AppFeeds, loadAppFeeds };
 from "../proto/xrpc.wm" import { AppError, describeError };
 from "../tui/command.wm" import * as Command;
@@ -28,7 +29,7 @@ from "./render.wm" import * as Render;
 from "./tabs.wm" import * as Tabs;
 from "./preload.wm" import * as Preload;
 from "../tui/reachability.wm" import * as Reach;
-from "./update.wm" import { updateState };
+from "./update.wm" import { updateStateAt };
 
 let startFeeds = (feeds: UiFeeds) => {
   let initial = UiState(
@@ -49,12 +50,12 @@ let startFeeds = (feeds: UiFeeds) => {
   let plan = buildPrefetchPlan(initial);
   -- Preparation runs with actual terminal geometry before the first paint.
   let startupTasks = [Tabs.discover(plan.state), ..plan.tasks];
-  let started = Runtime.runRetainedManagedPrepared(
+  let started = Runtime.runRetainedManagedPreparedContext(
     plan.state,
     startupTasks,
     (state: UiState) => { scheduleThreadPrefetch(state) },
     Preload.prepare,
-    (key, state: UiState) => { updateState(key, state) },
+    (key, state: UiState, memory) => { updateStateAt(key, state, memory.model) },
     (previous, state: UiState, size: Geometry.Size) => {
       Render.render(previous, state, size)
     },
@@ -63,8 +64,12 @@ let startFeeds = (feeds: UiFeeds) => {
 };
 
 let main = () => {
-  loadAppFeeds(30)
-    :> Task.map(uiFeedsPending)
+  Config.load() :> Task.andThen((settings) => {
+    loadAppFeeds(30) :> Task.map((loaded) => {
+      let feeds = uiFeedsPending(loaded);
+      .{ ..feeds, settings = settings }
+    })
+  })
     :> Task.andThen(startFeeds)
     :> Task.recover((error) => {
       print("atview tui: " ++ describeError(error));

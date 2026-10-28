@@ -232,7 +232,7 @@ let rec waitRetained = (
     :> Task.map((wake) => {
       match(wake) {
         InputWake(events) => {
-          match(prepareApplied(applyConcurrent(update, events, running), output, memory, prepare)) {
+          match(prepareApplied(applyConcurrent((key, state) => { update(key, state, memory) }, events, running), output, memory, prepare)) {
             AppliedQuit => {
               restore(input, output, 0)
             },
@@ -372,7 +372,7 @@ let rec listenRetained = (input, output, update, render, running, memory) => {
   }
 };
 
-let runRetainedManagedPrepared = (
+let runRetainedManagedPreparedContext = (
   initial,
   initialTasks,
   settle,
@@ -422,6 +422,12 @@ let runRetainedManagedPrepared = (
       }
     },
   }
+};
+
+-- Contextual input sees exactly the retained frame that was last painted.
+let runRetainedManagedPrepared = (initial, tasks, settle, prepare, update, render) => {
+  runRetainedManagedPreparedContext(initial, tasks, settle, prepare,
+    (key, state, _memory) => { update(key, state) }, render)
 };
 
 -- Preparation receives actual terminal geometry and previous retained memory

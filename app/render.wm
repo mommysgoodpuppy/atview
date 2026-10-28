@@ -338,7 +338,7 @@ let project = (previous, state: UiState, size: Geometry.Size) => {
   let posts = postsFor(state.feeds, state.view);
   let body = contentBody(size);
   let split = panes(body, size);
-  let layout = FeedLayout(split.feed.width, size, state.imageScale);
+  let layout = feedLayout(split.feed.width, size, state);
   let heights = cardHeights(posts, layout);
   let feedStrip = Scroll.Strip(heights, split.feed.height, 1);
   let labels = state.feeds.tabs :> List.map((tab) => { tab.title });

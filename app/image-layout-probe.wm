@@ -1,3 +1,8 @@
+from "./update.wm" import * as Update;
+from "../tui/event.wm" import * as Event;
+from "../tui/command.wm" import * as Command;
+from "./config.wm" import * as Config;
+from "./preload.wm" import * as Preload;
 -- Aspect-sized media must leave no fixed-height letterbox in either pane.
 from "./model.wm" import *;
 from "./feed-view.wm" import * as Feed;
@@ -88,5 +93,36 @@ let main = () => {
   let resolvedState = .{ ..pendingState, renderVersion = 1, feeds = makeUiFeeds("test", "did:test", "", [item, textPost], [], None, None) };
   let resolvedFrame = Render.render(Some(initialFrame.memory), resolvedState, smallSize);
   expect(resolvedFrame.memory.model.scrollTarget == initialFrame.memory.model.scrollTarget, "known image ratio must prevent viewport shifts on download");
+  let thumbnailState = .{ ..state, feeds = .{ ..state.feeds, settings = Config.Settings(true) } };
+  let thumbnailLayout = feedLayout(42, size, thumbnailState);
+  let thumbnailHeight = Feed.cardHeightMode(42, size, Image.Fit, item, true);
+  expect(thumbnailHeight == 6, "wide thumbnail must use its own narrow width");
+  expect(Feed.cardHeights([item], thumbnailLayout) == [thumbnailHeight], "scroll measurements must use thumbnail geometry");
+  let thumbnailCard = Feed.cardMode(Geometry.rect(0, 0, 42, thumbnailHeight), item, size, Image.Fit, false, 1000, true, true);
+  let thumbnailMedia = imageArea(thumbnailCard, 100000) :> Option.getOr(Geometry.rect(0, 0, 0, 0));
+  expect(thumbnailMedia.width == 8 && thumbnailMedia.height == 1, "thumbnail must constrain both physical dimensions");
+  expect(metricsArea(thumbnailCard) :> Option.map((area) => { area.y == thumbnailMedia.y + thumbnailMedia.height }) :> Option.getOr(false), "thumbnail metrics must follow media");
+  expect(Feed.cardHeightMode(42, size, Image.Fit, loading, true) == thumbnailHeight, "pending thumbnail metadata must reserve final geometry");
+  expect(Feed.cardHeightMode(42, size, Image.Fill, item, true) == 9, "fill thumbnail must stay capped at four rows");
+  expect(Feed.mediaColumns(3, size, true) == 3, "thumbnail must fit narrow terminals");
+  expect(Feed.mediaColumns(40, Geometry.Size(160, 50, 16, 16), true) == 4, "thumbnail width must follow physical cell dimensions");
+  expect(imageArea(Thread.threadPane(Geometry.rect(0, 0, 82, 40), thumbnailState, size), 1) == Some(detailMedia), "thumbnail mode must preserve full detail images");
+  let portraitItem = .{ ..item, image = Resource.Ready(Some(tall)) };
+  expect(Feed.cardHeightMode(42, size, Image.Fit, portraitItem, true) == 9, "portrait thumbnails must stay capped at four rows");
+  let twoPosts = .{ ..thumbnailState, feeds = .{ ..thumbnailState.feeds, tabs = [FeedTab(Timeline, "Following", [item, textPost], None, true, false, "", 0, 0)] } };
+  let thumbnailFrame = Render.render(None, twoPosts, size);
+  let split = panes(contentBody(size), size);
+  let firstHeight = Feed.cardHeightMode(split.feed.width, size, Image.Fit, item, true);
+  let clicked = Update.updateStateAt(Event.Click(split.feed.x + 1, split.feed.y + firstHeight - 1), twoPosts, thumbnailFrame.memory.model);
+  let selected = match(clicked) {
+    Command.Continue(next) => { next.selected },
+    Command.Spawn(next, _) => { next.selected },
+    Command.SpawnMany(next, _) => { next.selected },
+    Command.Await(next, _) => { next.selected },
+    Command.Quit => { -1 },
+  };
+  expect(selected == 1, "mouse targeting must follow compact thumbnail card extents");
+  let candidate = List.at(Preload.candidates(thumbnailState, size), 0);
+  expect(candidate :> Option.map((value) => { value.bounds.height == thumbnailHeight - 2 }) :> Option.getOr(false), "preload bounds must use thumbnail card height");
   print("image layout probe: ok")
 };

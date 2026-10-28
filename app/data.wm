@@ -3,7 +3,7 @@
 from "./model.wm" import *;
 from "../proto/api.wm" import { AppFeeds, FeedPost };
 from "../proto/views.wm" import * as Views;
-from "../proto/xrpc.wm" import { AppError, describeError };
+from "../proto/xrpc.wm" import { describeError };
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/kitty.wm" import * as Kitty;
 from "../tui/resource.wm" import * as Resource;

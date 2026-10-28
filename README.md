@@ -95,6 +95,26 @@ immediately; obsolete image placements are discarded and encoded output is cache
 half-block crops reuse position-independent prepared rows, including on the first scroll through a
 new crop; clipping does not rescale the image.
 
+## Configuration
+
+The TUI reads `atview.won` from the directory where you launch it. Settings use
+Workman Object Notation (WON):
+
+```won
+{
+  timelineThumbnailMode = true
+}
+```
+
+Thumbnail mode limits post media in all timeline tabs to a small preview, at most
+four terminal rows tall with a matching physical width. The detail pane keeps its
+larger images. `f` still switches fit/fill for both views. Restart atview after editing.
+If the file or setting is absent, thumbnail mode defaults to `false`, preserving
+the regular inline images. Invalid WON or a non-boolean value reports a config error
+before authentication. Credentials remain in `.env`.
+
+See [`atview.example.won`](atview.example.won) for a sample.
+
 ## Authentication
 
 Create `.env` in the repository root:
@@ -133,6 +153,12 @@ handle and DID. Tokens are retained in memory for the duration of one command an
   session reaction overrides shared by feed tabs and cached threads.
 - `app/likes-probe.wm` — fake-write payload, toggle, failure, stale-result, and retained rendering
   probe; run with `ATVIEW_IMAGE_BACKEND=kitty wm run app/likes-probe.wm`.
+- Mouse: left-click a feed card to select it, click a tab to switch feeds, or click the
+  header arrows to cycle tabs. The wheel scrolls the feed; releases and other mouse buttons
+  do not trigger keyboard shortcuts.
+- `app/mouse-probe.wm` and `tui/event-pattern-probe.wm` — offline mouse targeting and
+  input-decoding regressions; run with `wm run app/mouse-probe.wm` and
+  `wm run tui/event-pattern-probe.wm`.
 - `tui/tabs.wm` — reusable content-sized tab strip with partial labels and active-tab visibility
   on narrow screens.
 - `tui/clipping-probe.wm` — text/line viewport clipping and partial-tab regression probe; run

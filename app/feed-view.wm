@@ -1,9 +1,7 @@
 -- Feed-card measurement, wrapping, placement, and drawing.
 
 from "./model.wm" import *;
-from "../proto/api.wm" import { FeedPost };
 from "../proto/views.wm" import * as Views;
-from "../tui/ansi.wm" import * as Ansi;
 from "../tui/draw.wm" import * as Draw;
 from "../tui/element.wm" import * as Ui;
 from "../tui/geometry.wm" import * as Geometry;
@@ -119,21 +117,28 @@ let maximumCardHeight = (size: Geometry.Size) => {
   }
 };
 
-let cardHeight = (width, size, scale, item) => {
+let mediaColumns = (width, size, thumbnail) => {
+  if (thumbnail) { Geometry.clamp(0, width, Kitty.squareColumns(4, size)) } else { width }
+};
+let mediaMaximum = (maximum, thumbnail) => { if (thumbnail) { Geometry.clamp(0, maximum, 4) } else { maximum } };
+
+let cardHeightMode = (width, size, scale, item, thumbnail) => {
   let base = baseCardHeight(width, size, item);
   let avatarColumns = avatarColumns(2, size, item.avatar);
   let mediaWidth = Geometry.nonNegative(
     width - 2 - avatarColumns - (if (avatarColumns > 0) { 1 } else { 0 }),
   );
   let maximumImageRows = Geometry.nonNegative(maximumCardHeight(size) - base);
-  base + imageRows(mediaWidth, maximumImageRows, size, scale, item)
+  base + imageRows(mediaColumns(mediaWidth, size, thumbnail), mediaMaximum(maximumImageRows, thumbnail), size, scale, item)
 };
+
+let cardHeight = (width, size, scale, item) => { cardHeightMode(width, size, scale, item, false) };
 
 let rec cardHeights = match(posts, layout) => {
   ([], _) => { [] },
   ([item, ..tail], _) => {
     [
-      cardHeight(layout.width, layout.size, layout.scale, item),
+      cardHeightMode(layout.width, layout.size, layout.scale, item, layout.thumbnail),
       ..cardHeights(tail, layout),
     ]
   },
@@ -150,19 +155,19 @@ let cardText = (area, row, x, width, value, style) => {
   )
 };
 
-let cardMetrics = (area, item, size, scale) => {
+let cardMetricsMode = (area, item, size, scale, thumbnail) => {
   let columns = avatarColumns(2, size, item.avatar);
   let gap = if (columns > 0) { 1 } else { 0 };
   let width = Geometry.nonNegative(area.width - 2 - columns - gap);
-  let row = cardHeight(area.width, size, scale, item) - 2;
+  let row = cardHeightMode(area.width, size, scale, item, thumbnail) - 2;
   let rect = Geometry.rect(area.x + 1 + columns + gap, area.y + row, width, 1);
   Ui.showIf(row < area.height - 1 && rect.y >= 1,
     Ui.fragment([Ui.fill(rect, " ", Draw.plain), Ui.text(rect, metrics(item.post) ++ "   " ++ item.post.createdAt, Draw.muted)]))
 };
 
-let card = (area, item, size, scale, joinedBottom, avatarId, showImages) => {
+let cardMode = (area, item, size, scale, joinedBottom, avatarId, showImages, thumbnail) => {
   let innerWidth = Geometry.nonNegative(area.width - 2);
-  let avatarRows = if (cardHeight(area.width, size, scale, item) > 3) { 2 } else { 0 };
+  let avatarRows = if (cardHeightMode(area.width, size, scale, item, thumbnail) > 3) { 2 } else { 0 };
   let avatarColumns = avatarColumns(avatarRows, size, item.avatar);
   let textX = area.x + 1 + avatarColumns +
     (if (avatarColumns > 0) { 1 } else { 0 });
@@ -171,10 +176,10 @@ let card = (area, item, size, scale, joinedBottom, avatarId, showImages) => {
   );
   let lines = postLines(item.post.text, textWidth);
   let mediaRow = 2 + List.length(lines);
-  let metricsRow = cardHeight(area.width, size, scale, item) - 2;
+  //let metricsRow = cardHeightMode(area.width, size, scale, item, thumbnail) - 2;
   let rows = imageRows(
-    textWidth,
-    Geometry.nonNegative(maximumCardHeight(size) - baseCardHeight(area.width, size, item)),
+    mediaColumns(textWidth, size, thumbnail),
+    mediaMaximum(Geometry.nonNegative(maximumCardHeight(size) - baseCardHeight(area.width, size, item)), thumbnail),
     size,
     scale,
     item,
@@ -194,7 +199,7 @@ let card = (area, item, size, scale, joinedBottom, avatarId, showImages) => {
       lines,
       Draw.plain,
     ),
-    cardMetrics(area, item, size, scale),
+    cardMetricsMode(area, item, size, scale, thumbnail),
     Ui.suspense(
       if (showImages) { item.avatar } else { hideMedia(item.avatar) },
       Ui.fill(
@@ -217,13 +222,13 @@ let card = (area, item, size, scale, joinedBottom, avatarId, showImages) => {
     ),
     Ui.suspense(
       if (showImages) { item.image } else { hideMedia(item.image) },
-      Ui.textViewport(Geometry.rect(textX, area.y + mediaRow, textWidth, rows), contentBody(size), "loading image…", "", Draw.muted),
+      Ui.textViewport(Geometry.rect(textX, area.y + mediaRow, mediaColumns(textWidth, size, thumbnail), rows), contentBody(size), "loading image…", "", Draw.muted),
       (_) => { Ui.empty },
       (image) => {
         Ui.optional(image, (value) => {
           Ui.imageViewport(
             99000 + avatarId,
-            Geometry.rect(textX, area.y + mediaRow, textWidth, rows),
+            Geometry.rect(textX, area.y + mediaRow, mediaColumns(textWidth, size, thumbnail), rows),
             contentBody(size),
             scale,
             value,
@@ -234,9 +239,9 @@ let card = (area, item, size, scale, joinedBottom, avatarId, showImages) => {
   ])
 };
 
-let cardMedia = (area, item, size, scale, imageId, showImages) => {
+let cardMedia = (area, item, size, scale, imageId, showImages, thumbnail) => {
   let innerWidth = Geometry.nonNegative(area.width - 2);
-  let avatarRows = if (cardHeight(area.width, size, scale, item) > 3) { 2 } else { 0 };
+  let avatarRows = if (cardHeightMode(area.width, size, scale, item, thumbnail) > 3) { 2 } else { 0 };
   let avatarColumns = avatarColumns(avatarRows, size, item.avatar);
   let textX = area.x + 1 + avatarColumns +
     (if (avatarColumns > 0) { 1 } else { 0 });
@@ -245,18 +250,18 @@ let cardMedia = (area, item, size, scale, imageId, showImages) => {
   );
   let lines = postLines(item.post.text, textWidth);
   let mediaRow = 2 + List.length(lines);
-  let metricsRow = cardHeight(area.width, size, scale, item) - 2;
+  //let metricsRow = cardHeightMode(area.width, size, scale, item, thumbnail) - 2;
   let rows = imageRows(
-    textWidth,
-    Geometry.nonNegative(maximumCardHeight(size) - baseCardHeight(area.width, size, item)),
+    mediaColumns(textWidth, size, thumbnail),
+    mediaMaximum(Geometry.nonNegative(maximumCardHeight(size) - baseCardHeight(area.width, size, item)), thumbnail),
     size,
     scale,
     item,
   );
-  let mediaArea = Geometry.intersect(Geometry.rect(textX, area.y + mediaRow, textWidth, rows), contentBody(size));
+  let mediaArea = Geometry.intersect(Geometry.rect(textX, area.y + mediaRow, mediaColumns(textWidth, size, thumbnail), rows), contentBody(size));
   let image = if (showImages) {
     Ui.optional(mediaValue(item.image), (value) => {
-      Ui.imageViewport(imageId, Geometry.rect(textX, area.y + mediaRow, textWidth, rows), contentBody(size), scale, value)
+      Ui.imageViewport(imageId, Geometry.rect(textX, area.y + mediaRow, mediaColumns(textWidth, size, thumbnail), rows), contentBody(size), scale, value)
     })
   } else {
     Ui.empty
@@ -275,13 +280,13 @@ let rec mediaCards = match(area, posts, index, layout, showImages) => {
     match(posts) {
       [] => { "" },
       [item, ..tail] => {
-        let height = cardHeight(area.width, layout.size, layout.scale, item);
+        let height = cardHeightMode(area.width, layout.size, layout.scale, item, layout.thumbnail);
         if (area.height < 2) {
           ""
         } else {
           let visibleHeight = Geometry.clamp(2, height, area.height);
           let cardArea = Geometry.rect(area.x, area.y, area.width, visibleHeight);
-          cardMedia(cardArea, item, layout.size, layout.scale, 99000 + index, showImages) ++
+          cardMedia(cardArea, item, layout.size, layout.scale, 99000 + index, showImages, layout.thumbnail) ++
             mediaCards(
               Geometry.rect(
                 area.x,
@@ -310,7 +315,7 @@ let rec cards = match(area, posts, index, layout, showImages) => {
     match(posts) {
       [] => { Ui.empty },
       [item, ..tail] => {
-        let height = cardHeight(area.width, layout.size, layout.scale, item);
+        let height = cardHeightMode(area.width, layout.size, layout.scale, item, layout.thumbnail);
         if (area.height < 2) {
           Ui.fill(area, "─", Draw.muted)
         } else {
@@ -320,7 +325,7 @@ let rec cards = match(area, posts, index, layout, showImages) => {
             _ => { area.height > visibleHeight },
           };
           Ui.fragment([
-            card(
+            cardMode(
               Geometry.rect(area.x, area.y, area.width, visibleHeight),
               item,
               layout.size,
@@ -328,6 +333,7 @@ let rec cards = match(area, posts, index, layout, showImages) => {
               joinedBottom,
               1000 + index,
               showImages,
+              layout.thumbnail,
             ),
             cards(
               Geometry.rect(
@@ -360,12 +366,14 @@ let rec metricCards = match(area, posts, layout) => {
   (_, [], _) => { Ui.empty },
   (_, [item, ..tail], _) => {
     if (area.height < 2) { Ui.empty } else {
-      let height = Geometry.clamp(2, cardHeight(area.width, layout.size, layout.scale, item), area.height);
+      let height = Geometry.clamp(2, cardHeightMode(area.width, layout.size, layout.scale, item, layout.thumbnail), area.height);
       Ui.fragment([
-        cardMetrics(Geometry.rect(area.x, area.y, area.width, height), item, layout.size, layout.scale),
+        cardMetricsMode(Geometry.rect(area.x, area.y, area.width, height), item, layout.size, layout.scale, layout.thumbnail),
         metricCards(Geometry.rect(area.x, area.y + height - 1, area.width, area.height - height + 1), tail, layout),
       ])
     }
   },
 };
 let renderMetrics = (area, posts, layout: FeedLayout) => { Ui.render(layout.size, metricCards(area, posts, layout)) };
+
+let card = (area, item, size, scale, joinedBottom, avatarId, showImages) => { cardMode(area, item, size, scale, joinedBottom, avatarId, showImages, false) };

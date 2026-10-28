@@ -1,5 +1,6 @@
 -- Bluesky application model shared by loading, scheduling, updating, and rendering.
 
+from "./config.wm" import * as Config;
 from "../proto/api.wm" import { FeedPost };
 from "../proto/views.wm" import * as Views;
 from "../proto/xrpc.wm" import { AppError };
@@ -58,6 +59,7 @@ record PostReaction = {
 };
 
 record UiFeeds = {
+  settings: Config.Settings,
   handle: String,
   did: String,
   accessJwt: String,
@@ -78,7 +80,7 @@ let emptyTab = (view, title) => {
   FeedTab(view, title, [], None, false, false, "", 0, 0)
 };
 let makeUiFeeds = (handle, did, jwt, timeline, own, timelineCursor, ownCursor) => {
-  UiFeeds(handle, did, jwt, [
+  UiFeeds(Config.defaults, handle, did, jwt, [
     FeedTab(Timeline, "Following", timeline, timelineCursor, true, false, "", 0, 0),
     FeedTab(OwnPosts, "My posts", own, ownCursor, true, false, "", 0, 0),
   ], [], 0, 0)
@@ -112,6 +114,7 @@ record UiState = {
 };
 
 record FeedLayout = {
+  thumbnail: Bool,
   width: Number,
   size: Geometry.Size,
   scale: Image.Scale,
@@ -337,3 +340,5 @@ let selectedLikePending = (state: UiState) => {
 let footerStatus = (state: UiState) => {
   if (selectedLikePending(state)) { "saving like…" } else { state.status }
 };
+
+let feedLayout = (width, size, state: UiState) => { FeedLayout(state.feeds.settings.timelineThumbnailMode, width, size, state.imageScale) };

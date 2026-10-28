@@ -35,7 +35,7 @@ let neighboringViews = (state: UiState) => {
 };
 let stripFor = (state: UiState, view, size: Geometry.Size) => {
   let split = panes(contentBody(size), size);
-  Scroll.Strip(Feed.cardHeights(postsFor(state.feeds, view), FeedLayout(split.feed.width, size, state.imageScale)), split.feed.height, 1)
+  Scroll.Strip(Feed.cardHeights(postsFor(state.feeds, view), feedLayout(split.feed.width, size, state)), split.feed.height, 1)
 };
 let windowFor = (strip: Scroll.Strip, width, offset, before, after) => {
   let content = Geometry.rect(0, 0, width, Scroll.contentExtent(strip.extents, strip.overlap));
@@ -63,11 +63,11 @@ let surfaces = (previous, state, size) => { surfacesFrom(Render.project(previous
 let candidatesFor = (state: UiState, size: Geometry.Size, views) => {
   let width = panes(contentBody(size), size);
   state.feeds.tabs :> List.filter((tab) => { List.find(views, (view) => { sameView(view, tab.view) }) != None }) :> concatMap((tab) => {
-    let layout = FeedLayout(width.feed.width, size, state.imageScale);
+    let layout = feedLayout(width.feed.width, size, state);
     let rec rows = match(posts, offset) => {
       ([], _) => { [] },
       ([post, ..tail], _) => {
-        let height = Feed.cardHeight(layout.width, size, layout.scale, post);
+        let height = Feed.cardHeightMode(layout.width, size, layout.scale, post, layout.thumbnail);
         let request = Data.MediaRequest(tab.view, post.post.uri, true);
         [Reach.Candidate(tab.view, Geometry.rect(0, offset + 1, layout.width, Geometry.nonNegative(height - 2)), request),
           ..rows(tail, offset + height - 1)]
@@ -100,7 +100,7 @@ let warmRegion = (state: UiState, size: Geometry.Size, view, bounds: Geometry.Re
     let nearby = Geometry.rect(split.feed.x, split.feed.y + bounds.y - origin, split.feed.width, bounds.height);
     let area = Geometry.rect(split.feed.x, nearby.y - viewport.inset, split.feed.width, nearby.height + viewport.inset);
     let cards = Feed.cards(area, List.drop(postsFor(state.feeds, view), viewport.start), viewport.start,
-      FeedLayout(split.feed.width, size, state.imageScale), true);
+      feedLayout(split.feed.width, size, state), true);
     Ui.preloadWithin(size, nearby, cards)
   }
 };

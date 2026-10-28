@@ -1,5 +1,7 @@
 -- Application event transitions and asynchronous feed pagination.
 
+from "./feed-view.wm" import * as Feed;
+from "../tui/tabs.wm" import * as TabBar;
 from "./data.wm" import { pendingPosts };
 from "./tabs.wm" import * as Tabs;
 from "./graph.wm" import { buildPrefetchPlan, loadSelectedThread };
@@ -13,6 +15,7 @@ from "../proto/feed-tabs.wm" import * as SavedFeeds;
 from "../proto/xrpc.wm" import { AppError, JavaScriptFailure, describeError };
 from "../tui/command.wm" import * as Command;
 from "../tui/event.wm" import * as Event;
+from "../tui/image.wm" import * as Image;
 from "../tui/geometry.wm" import * as Geometry;
 from "../tui/timer.wm" import * as Timer;
 from "../tui/scroll.wm" import * as Scroll;
@@ -345,4 +348,65 @@ let updateState = (key, state) => {
   let updated = updateStateBase(key, state);
   let scrolling = if (scrollKey(key)) { beginScroll(updated) } else { updated };
   scrolling
+};
+
+-- Hit testing uses the painted offsets, including partially visible cards/tabs.
+let rec hitExtent = match(extents, position, overlap, index) => {
+  ([], _, _, _) => { None },
+  ([extent], _, _, _) => {
+    if (position >= 0 && position < extent) { Some(index) } else { None }
+  },
+  ([extent, ..tail], _, _, _) => {
+    let stride = Geometry.nonNegative(extent - overlap);
+    if (position >= 0 && position < stride) { Some(index) } else {
+      hitExtent(tail, position - stride, overlap, index + 1)
+    }
+  },
+};
+
+let updateStateAt = (key, state: UiState, painted: RenderModel) => {
+  match(key) {
+    Event.Click(x, y) => {
+      let size = painted.size;
+      if (x < 0 || x >= size.width || y < 0 || y >= size.height) {
+        Command.Continue(state)
+      } else {
+        if (y == 0 && size.width >= 12) {
+          if (x < 4) { adjacentTab(state, -1) } else {
+            if (x >= size.width - 4) { adjacentTab(state, 1) } else {
+              let labels = state.feeds.tabs :> List.map((tab) => { tab.title });
+              let strip = TabBar.track(size.width, labels);
+              let hit = hitExtent(strip.extents, x - 4 + painted.tabScroll.position, 0, 0);
+              match(hit) {
+                None => { Command.Continue(state) },
+                Some(index) => {
+                  match(List.at(state.feeds.tabs, index)) {
+                    Some(tab) => { activateTab(state, tab.view) },
+                    None => { Command.Continue(state) },
+                  }
+                },
+              }
+            }
+          }
+        } else {
+          let split = panes(contentBody(size), size);
+          let area = split.feed;
+          if (!sameView(state.view, painted.state.view) || x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height) {
+            Command.Continue(state)
+          } else {
+            let heights = Feed.cardHeights(postsForState(painted.state), feedLayout(area.width, size, painted.state));
+            match(hitExtent(heights, y - area.y + painted.scrollOffset, 1, 0)) {
+              None => { Command.Continue(state) },
+              Some(index) => {
+                if (index == state.selected) { Command.Continue(state) } else {
+                  loadSelectedThread(.{ ..state, selected = index })
+                }
+              },
+            }
+          }
+        }
+      }
+    },
+    _ => { updateState(key, state) },
+  }
 };
