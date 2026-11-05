@@ -1,0 +1,26 @@
+from js.global("JSON") import unsafe { stringify: value -> String } as JSON;
+from "../app/repl-client.wm" import * as Client;
+from "../app/repl-codec.wm" import * as Codec;
+from "../proto/views.wm" import * as Views;
+from "./inline-image.wm" import * as Inline;
+from "./terminal-cap.wm" import * as Cap;
+
+-- Each step works alone: post.image -> load -> text -> draw. show(Image.source)
+-- starts from an image, and show(Image) starts from a post.
+let text = Inline.text;
+let draw = Inline.draw;
+let request = (source: Views.PostImage) => {
+  JSON.stringify(JSON{ url: source.fullsize, alt: source.alt, decodePixels: Cap.renderer != Cap.KittyRenderer })
+};
+let tryLoad = (source: Views.PostImage) => {
+  Client.call("image", request(source)) :> Result.andThen(Codec.decodeRaster)
+};
+let load = (source: Views.PostImage) => { tryLoad(source) :> Client.value };
+let source = (source: Views.PostImage) => { draw(load(source)) };
+let display = (post: Views.Post) => {
+  match(post.image) {
+    None => { Err("post has no image") },
+    Some(image) => { tryLoad(image) :> Result.map(draw) },
+  }
+};
+let carrier = (post) => { display(post) :> Client.value };

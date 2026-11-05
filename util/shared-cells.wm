@@ -1,0 +1,16 @@
+-- Reflect.construct handles the host's ArrayBufferLike constructor overload.
+from js.global import type { SharedArrayBuffer, Int32Array, Uint8Array };
+from js.global import unsafe { Int32Array as constructor: Js.Value, Uint8Array as byteConstructor: Js.Value };
+from js.global("Reflect") import { construct };
+let cells = (shared: SharedArrayBuffer) => {
+  construct(constructor, JSON[shared]) :> Result.andThen((raw) => {
+    let value: Result<Int32Array, Js.Error> = raw :> Json.assert;
+    value
+  })
+};
+let bytes = (shared: SharedArrayBuffer) => {
+  construct(byteConstructor, JSON[shared]) :> Result.andThen((raw) => {
+    let value: Result<Uint8Array, Js.Error> = raw :> Json.assert;
+    value
+  })
+};

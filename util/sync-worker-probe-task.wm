@@ -1,0 +1,29 @@
+-- Offline proof: an ordinary Workman Task completes while its caller waits.
+from js.global import { addEventListener, fetch };
+from js.global import type { SharedArrayBuffer };
+from js.global("Reflect") import { get };
+from js.global("Atomics") import { store, notify };
+from "./shared-cells.wm" import { cells as sharedCells };
+
+record Request = { signal: SharedArrayBuffer };
+let main = () => {
+  addEventListener("message", (event) => {
+    let request: Result<Request, Js.Error> = get(event, "data") :> Result.andThen(Json.assert);
+    let _ = request :> Task.fromResult :> Task.andThen((request) => {
+      let cells = sharedCells(request.signal) :> Result.debug;
+      fetch("data:text/plain,ready") :> Task.andThen((response) => { response :> .text() })
+        :> Task.map((text) => {
+          store(cells, 1, if (text == "ready") { 42 } else { -1 }) :> Result.debug;
+          store(cells, 0, 1) :> Result.debug;
+          notify(cells, 0, 1) :> Result.debug;
+          void
+        }) :> Task.recover((_) => {
+          store(cells, 1, -1) :> Result.debug;
+          store(cells, 0, 1) :> Result.debug;
+          notify(cells, 0, 1) :> Result.debug;
+          void
+        })
+    });
+    void
+  }) :> Result.debug
+};

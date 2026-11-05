@@ -1,0 +1,31 @@
+-- Reusable worker listener. Task errors complete the reply; host crashes time out.
+from "./sync-rpc.wm" import * as Rpc;
+from js.global import { addEventListener };
+from js.global("Reflect") import { get };
+
+let start = (handler: (String, String) -> Task<String, String>) => {
+  addEventListener("message", (event) => {
+    let decoded: Result<Rpc.Request, Js.Error> = get(event, "data") :> Result.andThen(Json.assert);
+    match(decoded) {
+      Err(_) => { void },
+      Ok(request) => {
+        if (request.phase == "hello") {
+          Rpc.hello(request) :> Result.debug;
+          void
+        } else { if (request.phase == "collect") {
+          Rpc.collect(request) :> Result.debug;
+          void
+        } else {
+          let _ = handler(request.name, request.body) :> Task.map((body) => {
+              Rpc.complete(request, Ok(body)) :> Result.debug;
+              void
+            }) :> Task.recover((error) => {
+              Rpc.complete(request, Err(error)) :> Result.debug;
+              void
+            });
+          void
+        } }
+      },
+    }
+  }) :> Result.debug
+};

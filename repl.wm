@@ -1,0 +1,46 @@
+from js.global("JSON") import unsafe { stringify: value -> String } as JSON;
+-- Completed-value REPL facade. The worker invokes the existing async API.
+from "./app/repl-client.wm" import * as Client;
+from "./app/repl-codec.wm" import * as Codec;
+from "./proto/auth.wm" import * as Auth;
+export from "./proto/views.wm" import * as Views;
+export from "./proto/xrpc.wm" import { describeError };
+export from "./tui/repl-image.wm" import * as Image;
+export from "./util/repl-value-text.wm" import * as Text;
+export from "./repl-async.wm" import * as Async;
+
+let show = (value, renderer) => { renderer(value) };
+let inspect = (value) => { print(value) };
+let hasCursor = match(cursor) => { None => { false }, Some(_) => { true } };
+let profile = (actor) => { Client.call("profile", JSON.stringify(JSON{ actor: actor })) :> Result.andThen(Codec.decodeProfile) :> Client.value };
+let feedPage = (actor, limit, cursor) => {
+  Client.call("feed", JSON.stringify(JSON{ actor: actor, limit: limit, cursor: cursor :> Option.getOr(""), cursorSet: hasCursor(cursor) })) :> Result.andThen(Codec.decodeFeed) :> Client.value
+};
+let feed = (actor, limit) => { feedPage(actor, limit, None) };
+let thread = (uri, depth) => { Client.call("thread", JSON.stringify(JSON{ uri: uri, depth: depth })) :> Result.andThen(Codec.decodeThread) :> Client.value };
+let fetchPost = (url) => { Client.call("fetchPost", JSON.stringify(JSON{ uri: url })) :> Result.andThen(Codec.decodePost) :> Client.value };
+
+-- Sessions cross the worker boundary as data, then stay behind a function in
+-- the interactive account value so printing that value does not expose JWTs.
+record Account = { handle: String, did: String, session: Void -> Auth.Session };
+let account = (session: Auth.Session) => { Account(session.handle, session.did, () => { session }) };
+let sessionValue = (user: Account) => { Codec.sessionValue(user.session()) };
+let login = () => { Client.call("login", JSON.stringify(JSON{})) :> Result.andThen(Codec.decodeSession) :> Result.map(account) :> Client.value };
+let refresh = (user: Account) => { Client.call("refresh", JSON.stringify(JSON{ session: sessionValue(user) })) :> Result.andThen(Codec.decodeSession) :> Result.map(account) :> Client.value };
+let timeline = (user: Account, limit, cursor) => {
+  Client.call("timeline", JSON.stringify(JSON{ session: sessionValue(user), limit: limit, cursor: cursor :> Option.getOr(""), cursorSet: hasCursor(cursor) })) :> Result.andThen(Codec.decodeFeed) :> Client.value
+};
+let authenticatedFeed = (user: Account, actor, limit, cursor) => {
+  Client.call("authenticatedFeed", JSON.stringify(JSON{ session: sessionValue(user), actor: actor, limit: limit, cursor: cursor :> Option.getOr(""), cursorSet: hasCursor(cursor) })) :> Result.andThen(Codec.decodeFeed) :> Client.value
+};
+let myPosts = (user: Account, limit, cursor) => { authenticatedFeed(user, user.did, limit, cursor) };
+let search = (user: Account, term, limit) => {
+  Client.call("search", JSON.stringify(JSON{ session: sessionValue(user), term: term, limit: limit })) :> Result.andThen(Codec.decodeSearch) :> Client.value
+};
+let authenticatedThread = (user: Account, uri, depth) => {
+  Client.call("authenticatedThread", JSON.stringify(JSON{ session: sessionValue(user), uri: uri, depth: depth })) :> Result.andThen(Codec.decodeThread) :> Client.value
+};
+let pinnedFeeds = (user: Account) => { Client.call("pinnedFeeds", JSON.stringify(JSON{ session: sessionValue(user) })) :> Result.andThen(Codec.decodeSavedFeeds) :> Client.value };
+let pinnedPage = (user: Account, kind, uri, limit, cursor) => {
+  Client.call("pinnedPage", JSON.stringify(JSON{ session: sessionValue(user), kind: kind, uri: uri, limit: limit, cursor: cursor :> Option.getOr(""), cursorSet: hasCursor(cursor) })) :> Result.andThen(Codec.decodeFlatPage) :> Client.value
+};

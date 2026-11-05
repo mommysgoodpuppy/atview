@@ -1,0 +1,9 @@
+from "./sync-rpc-worker.wm" import { start };
+from js.global import { fetch };
+let dispatch = match(name, body) => {
+  ("echo", _) => { Task.succeed(body) },
+  ("error", _) => { Task.fail("expected worker error") },
+  ("async", _) => { fetch("data:text/plain,completed") :> Task.andThen((response) => { response :> .text() }) :> Task.mapErr((_) => { "fetch failed" }) },
+  _ => { Task.fail("unknown probe operation") },
+};
+let main = () => { start(dispatch) };

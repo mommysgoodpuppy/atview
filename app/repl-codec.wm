@@ -1,0 +1,140 @@
+-- Typed worker transport codecs. Reuse the protocol decoders on receipt;
+-- never serialize compiler-owned constructor IDs or function closures.
+from "../proto/views.wm" import * as Views;
+from "../proto/api.wm" import * as Api;
+from "../proto/auth.wm" import * as Auth;
+from "../proto/feed-tabs.wm" import * as Feeds;
+from "../proto/xrpc.wm" import * as Xrpc;
+from "../tui/image.wm" import * as Raster;
+from "../tui/png.wm" import * as Png;
+from js.global("JSON") import { parse };
+from js.global("JSON") import unsafe { stringify: value -> String } as JSON;
+from js.module("node:buffer") import { Buffer };
+
+let string = (value: String) => { JSON.stringify(value) };
+let rec join = match(items) => {
+  [] => { "" }, [only] => { only }, [head, ..tail] => { head ++ "," ++ join(tail) },
+};
+let array = (items, encode) => { "[" ++ join(List.map(items, encode)) ++ "]" };
+let optional = match(item, encode) => {
+  (None, _) => { "null" }, (Some(value), _) => { encode(value) },
+};
+let aspect = (ratio: Views.AspectRatio) => { JSON.stringify(JSON{ width: ratio.width, height: ratio.height }) };
+let image = (source: Views.PostImage) => {
+  "{\"thumb\":" ++ JSON.stringify(source.thumb) ++ ",\"fullsize\":" ++ JSON.stringify(source.fullsize) ++
+    ",\"alt\":" ++ JSON.stringify(source.alt) ++ ",\"aspectRatio\":" ++ optional(source.aspectRatio, aspect) ++ "}"
+};
+let actor = (author: Views.Actor) => {
+  "{\"did\":" ++ JSON.stringify(author.did) ++ ",\"handle\":" ++ JSON.stringify(author.handle) ++
+    ",\"displayName\":" ++ optional(author.displayName, string) ++
+    ",\"avatar\":" ++ optional(author.avatar, string) ++ "}"
+};
+let post = (value: Views.Post) => {
+  let embed = match(value.image) {
+    None => { "null" },
+    Some(source) => { "{\"$type\":\"app.bsky.embed.images#view\",\"images\":[" ++ image(source) ++ "]}" },
+  };
+  "{\"uri\":" ++ JSON.stringify(value.uri) ++ ",\"cid\":" ++ JSON.stringify(value.cid) ++
+    ",\"author\":" ++ actor(value.author) ++
+    ",\"record\":" ++ JSON.stringify(JSON{ text: value.text, createdAt: value.createdAt }) ++
+    ",\"indexedAt\":" ++ JSON.stringify(value.indexedAt) ++
+    ",\"replyCount\":" ++ optional(value.replyCount, Text.of) ++
+    ",\"repostCount\":" ++ optional(value.repostCount, Text.of) ++
+    ",\"likeCount\":" ++ optional(value.likeCount, Text.of) ++
+    ",\"quoteCount\":" ++ optional(value.quoteCount, Text.of) ++
+    ",\"viewer\":{\"like\":" ++ optional(value.viewerLike, string) ++ "},\"embed\":" ++ embed ++ "}"
+};
+let feed = (page: Views.AuthorFeed) => {
+  "{\"feed\":" ++ array(page.posts, (value) => { "{\"post\":" ++ post(value) ++ "}" }) ++
+    ",\"cursor\":" ++ optional(page.cursor, string) ++ "}"
+};
+let profile = (value: Views.Profile) => {
+  "{\"did\":" ++ JSON.stringify(value.did) ++ ",\"handle\":" ++ JSON.stringify(value.handle) ++
+    ",\"displayName\":" ++ optional(value.displayName, string) ++
+    ",\"description\":" ++ optional(value.description, string) ++
+    ",\"followersCount\":" ++ optional(value.followersCount, Text.of) ++
+    ",\"followsCount\":" ++ optional(value.followsCount, Text.of) ++
+    ",\"postsCount\":" ++ optional(value.postsCount, Text.of) ++ "}"
+};
+let search = (value: Views.SearchResults) => {
+  "{\"posts\":" ++ array(value.posts, post) ++ ",\"cursor\":" ++ optional(value.cursor, string) ++
+    ",\"hitsTotal\":" ++ optional(value.hitsTotal, Text.of) ++ "}"
+};
+let rec threadValue = match(value) => {
+  Views.ThreadPost(value, replies) => {
+    "{\"$type\":\"app.bsky.feed.defs#threadViewPost\",\"post\":" ++ post(value) ++
+      ",\"replies\":" ++ array(replies, threadValue) ++ "}"
+  },
+  Views.MissingPost(uri) => { JSON.stringify(JSON{ "$type": "app.bsky.feed.defs#notFoundPost", uri: uri, notFound: true }) },
+  Views.BlockedPost(uri) => { JSON.stringify(JSON{ "$type": "app.bsky.feed.defs#blockedPost", uri: uri, blocked: true }) },
+  Views.UnknownThread(kind) => { JSON.stringify(JSON{ "$type": kind }) },
+};
+let thread = (value) => { "{\"thread\":" ++ threadValue(value) ++ "}" };
+let flatPage = (page: Api.FeedPage) => {
+  let posts = List.map(page.posts, (value) => {
+    -- Restore only the wire shape; these two unavailable fields are discarded
+    -- again by Api.feedPost after decoding the flattened page.
+    Views.Post(value.uri, value.cid, Views.Actor("", value.authorHandle, Some(value.authorName), value.avatar),
+      value.text, value.createdAt, "", value.replyCount, value.repostCount, value.likeCount, None, value.image, value.viewerLike)
+  });
+  feed(Views.AuthorFeed(posts, page.cursor))
+};
+let sessionValue = (value: Auth.Session) => {
+  JSON{ accessJwt: value.accessJwt, refreshJwt: value.refreshJwt, handle: value.handle, did: value.did }
+};
+let session = (value) => { JSON.stringify(sessionValue(value)) };
+let savedFeeds = (items: List<Feeds.SavedFeed>) => {
+  let values = List.map(items, (item) => { JSON{ kind: item.kind, uri: item.uri, title: item.title } });
+  JSON.stringify(JSON{ items: Js.Array.fromList(values) })
+};
+
+let object = (text) => {
+  parse(text) :> Result.andThen((raw) => {
+    let body: Result<Js.Object, Js.Error> = raw :> Json.assert;
+    body
+  }) :> Result.mapErr(Xrpc.describeJsError)
+};
+let decodeProfile = (text) => { object(text) :> Result.andThen((raw) => { Views.decodeProfile(raw) :> Result.mapErr(Xrpc.describeJsError) }) };
+let decodeFeed = (text) => { object(text) :> Result.andThen((raw) => { Views.decodeAuthorFeed(raw) :> Result.mapErr(Xrpc.describeJsError) }) };
+let decodePost = (text) => { object(text) :> Result.andThen((raw) => { Views.decodePost(raw) :> Result.mapErr(Xrpc.describeJsError) }) };
+let decodeSearch = (text) => { object(text) :> Result.andThen((raw) => { Views.decodeSearch(raw) :> Result.mapErr(Xrpc.describeJsError) }) };
+let decodeThread = (text) => { object(text) :> Result.andThen((raw) => { Views.decodeThread(raw) :> Result.mapErr(Xrpc.describeJsError) }) };
+let decodeFlatPage = (text) => {
+  decodeFeed(text) :> Result.map((page) => { Api.FeedPage(List.map(page.posts, Api.feedPost), page.cursor) })
+};
+let decodeSession = (text) => {
+  object(text) :> Result.andThen((raw) => {
+    let value: Result<Auth.Session, Js.Error> = raw :> Json.assert;
+    value :> Result.mapErr(Xrpc.describeJsError)
+  })
+};
+record Saved = { items: Js.Array<Feeds.SavedFeed> };
+let decodeSavedFeeds = (text) => {
+  object(text) :> Result.andThen((raw) => {
+    let value: Result<Saved, Js.Error> = raw :> Json.assert;
+    value :> Result.map((saved) => { Js.Array.toList(saved.items) }) :> Result.mapErr(Xrpc.describeJsError)
+  })
+};
+
+record LoadedImage = { base64: String, alt: String, width: Number, height: Number, pixels: String };
+let raster = (value: Raster.Image) => {
+  let pixels = match(value.pixels) {
+    None => { Ok("") },
+    Some(pixels) => { pixels.bytes :> .toString("base64") },
+  };
+  pixels :> Result.map((bytes) => {
+    JSON.stringify(JSON{ base64: value.base64, alt: value.alt, width: value.width, height: value.height, pixels: bytes })
+  }) :> Result.mapErr(Xrpc.describeJsError)
+};
+let decodeRaster = (text) => {
+  object(text) :> Result.andThen((raw) => {
+    let value: Result<LoadedImage, Js.Error> = raw :> Json.assert;
+    value :> Result.mapErr(Xrpc.describeJsError)
+  }) :> Result.andThen((value) => {
+    let pixels = if (value.pixels == "") { Ok(None) } else {
+      Buffer.from(value.pixels, "base64") :> Result.map((bytes) => { Some(Png.Pixels(bytes, value.width, value.height)) })
+        :> Result.mapErr(Xrpc.describeJsError)
+    };
+    pixels :> Result.map((pixels) => { Raster.Image(value.base64, value.alt, value.width, value.height, pixels) })
+  })
+};

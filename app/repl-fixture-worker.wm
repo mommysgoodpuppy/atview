@@ -1,0 +1,4 @@
+from js.module("./repl-fixture.ts") import { ready };
+from "./repl-operations.wm" import { dispatch };
+from "../util/sync-rpc-worker.wm" import { start };
+let main = () => { ready() :> Result.debug; start(dispatch) };

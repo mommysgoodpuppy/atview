@@ -1,0 +1,3 @@
+from "./repl-operations.wm" import { dispatch };
+from "../util/sync-rpc-worker.wm" import { start };
+let main = () => { start(dispatch) };

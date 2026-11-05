@@ -1,0 +1,16 @@
+from js.worker("./sync-rpc-probe-worker.wm") import { url } as Artifact;
+from "./sync-rpc.wm" import * as Rpc;
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let main = () => {
+  let empty = Rpc.call(Artifact.url, "echo", "") :> Result.debug;
+  expect(empty == "", "empty result must round trip");
+  let completed = Rpc.call(Artifact.url, "async", "") :> Result.debug;
+  expect(completed == "completed", "Task must finish before returning");
+  let large = "🦋 café\n" :> .repeat(100000) :> Result.debug;
+  let echoed = Rpc.call(Artifact.url, "echo", large) :> Result.debug;
+  expect(echoed == large, "large UTF-8 result must round trip without a fixed buffer limit");
+  expect(match(Rpc.call(Artifact.url, "error", "")) {
+    Err(message) => { message == "expected worker error" }, _ => { false },
+  }, "Task errors must cross the boundary");
+  print("sync RPC probe: async completion, UTF-8, empty/large replies, and errors passed")
+};

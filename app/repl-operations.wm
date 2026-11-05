@@ -1,0 +1,89 @@
+-- RPC adapters only: each operation invokes the existing Workman implementation.
+from "../proto/api.wm" import * as Api;
+from "../proto/auth.wm" import * as Auth;
+from "../proto/feed-tabs.wm" import * as Feeds;
+from "../proto/post-url.wm" import * as Url;
+from "./repl-codec.wm" import * as Codec;
+from "../proto/xrpc.wm" import * as Xrpc;
+from "../tui/kitty.wm" import * as Kitty;
+
+record Actor = { actor: String };
+record Page = { actor: String, limit: Number, cursor: String, cursorSet: Bool };
+record Link = { uri: String };
+record Timeline = { session: Auth.Session, limit: Number, cursor: String, cursorSet: Bool };
+record Thread = { uri: String, depth: Number };
+record Login = { session: Auth.Session };
+record AuthPage = { session: Auth.Session, actor: String, limit: Number, cursor: String, cursorSet: Bool };
+record Search = { session: Auth.Session, term: String, limit: Number };
+record AuthThread = { session: Auth.Session, uri: String, depth: Number };
+record PinnedPage = { session: Auth.Session, kind: String, uri: String, limit: Number, cursor: String, cursorSet: Bool };
+record Image = { url: String, alt: String, decodePixels: Bool };
+
+let read = (text) => {
+  Codec.object(text) :> Result.andThen((raw) => { raw :> Json.assert :> Result.mapErr(Xrpc.describeJsError) })
+};
+let cursor = (present, text) => { if (present) { Some(text) } else { None } };
+let encoded = (task, encode) => { task :> Task.map(encode) :> Task.mapErr(Xrpc.describeError) };
+let dispatch = match(name, body) => {
+  ("profile", _) => {
+    let input: Result<Actor, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => { encoded(Api.profile(input.actor), Codec.profile) })
+  },
+  ("feed", _) => {
+    let input: Result<Page, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => {
+      encoded(Api.authorFeedPage(input.actor, input.limit, cursor(input.cursorSet, input.cursor)), Codec.feed)
+    })
+  },
+  ("thread", _) => {
+    let input: Result<Thread, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => { encoded(Api.thread(input.uri, input.depth), Codec.thread) })
+  },
+  ("fetchPost", _) => {
+    let input: Result<Link, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => { encoded(Url.fetchPost(input.uri), Codec.post) })
+  },
+  ("login", _) => { encoded(Auth.login(), Codec.session) },
+  ("refresh", _) => {
+    let input: Result<Login, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => { encoded(Auth.refreshSession(input.session), Codec.session) })
+  },
+  ("timeline", _) => {
+    let input: Result<Timeline, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => {
+      encoded(Api.timelinePage(input.session.accessJwt, input.limit, cursor(input.cursorSet, input.cursor)), Codec.feed)
+    })
+  },
+  ("authenticatedFeed", _) => {
+    let input: Result<AuthPage, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => {
+      encoded(Api.authorFeedPageAuthenticated(input.session.accessJwt, input.actor, input.limit, cursor(input.cursorSet, input.cursor)), Codec.feed)
+    })
+  },
+  ("search", _) => {
+    let input: Result<Search, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => { encoded(Api.searchPostsAuthenticated(input.session, input.term, input.limit), Codec.search) })
+  },
+  ("authenticatedThread", _) => {
+    let input: Result<AuthThread, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => { encoded(Api.threadAuthenticated(input.session.accessJwt, input.uri, input.depth), Codec.thread) })
+  },
+  ("pinnedFeeds", _) => {
+    let input: Result<Login, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => { encoded(Feeds.pinnedFeeds(input.session.accessJwt), Codec.savedFeeds) })
+  },
+  ("pinnedPage", _) => {
+    let input: Result<PinnedPage, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => {
+      encoded(Feeds.page(input.session.accessJwt, input.kind, input.uri, input.limit, cursor(input.cursorSet, input.cursor)), Codec.flatPage)
+    })
+  },
+  ("image", _) => {
+    let input: Result<Image, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => {
+      Kitty.loadPngWithPixels(input.url, input.alt, input.decodePixels) :> Task.mapErr(Xrpc.describeError)
+        :> Task.andThen((image) => { Codec.raster(image) :> Task.fromResult })
+    })
+  },
+  _ => { Task.fail("unknown REPL operation: " ++ name) },
+};

@@ -1,0 +1,23 @@
+from "./inline-image.wm" import * as Inline;
+from "./image.wm" import * as Raster;
+from "./png.wm" import * as Png;
+from "./geometry.wm" import * as Geometry;
+from "./terminal-cap.wm" import * as Cap;
+from "./ansi.wm" import * as Ansi;
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let contains = (text: String, part) => { text :> .includes(part) :> Result.debug };
+let main = () => {
+  let base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  let pixels = Png.decode(base64) :> Result.debug;
+  let image = Raster.Image(base64, "red pixel", 1, 1, Some(pixels));
+  let output = Inline.render(Geometry.Size(10, 8, 8, 16), image);
+  expect(!contains(output, Ansi.alternateScreen) && !contains(output, Ansi.clear), "inline rendering must preserve the terminal screen");
+  expect(!contains(output, Ansi.cursorTo(1, 1)), "inline rendering must not jump to screen origin");
+  expect(contains(output, "\r\n"), "inline rendering must leave the cursor below the image");
+  match(Cap.renderer) {
+    Cap.KittyRenderer => { expect(contains(output, "a=T,f=100") && contains(output, base64), "Kitty must transmit PNG data") },
+    Cap.SixelRenderer => { expect(contains(output, Ansi.esc ++ "P0;1q"), "sixel must render pixel strips") },
+    Cap.HalfBlockRenderer => { expect(contains(output, "▀") && contains(output, Ansi.reset), "fallback must render colored half blocks") },
+  };
+  print("inline image probe passed")
+};

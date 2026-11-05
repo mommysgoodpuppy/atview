@@ -1,0 +1,22 @@
+-- Offline Workman-only proof; no TypeScript shim or API implementation.
+from js.worker("./sync-worker-probe-task.wm") import { url } as Artifact;
+from js.global import { Worker, SharedArrayBuffer };
+from js.global("Atomics") import { wait, load };
+from "./shared-cells.wm" import { cells as sharedCells };
+
+let main = () => {
+  let shared = SharedArrayBuffer.new(8) :> Result.debug;
+  let cells = sharedCells(shared) :> Result.debug;
+  let worker = Worker.new(Artifact.url, JSON{ "type": "module" }) :> Result.debug;
+  worker :> .postMessage(JSON{ signal: shared }) :> Result.debug;
+  let waited = wait(cells, 0, 0, 10000);
+  let result = load(cells, 1);
+  worker :> .terminate() :> Result.debug;
+  let timedOut = waited :> Result.getOr("timed-out");
+  let received = result :> Result.getOr(-1);
+  if (timedOut == "timed-out" || received != 42) {
+    Panic("Workman worker did not complete its Task while the caller waited")
+  } else {
+    print("Workman worker + Atomics: synchronous result 42 from asynchronous Task")
+  }
+};

@@ -1,0 +1,64 @@
+-- Bluesky post links and AT record URIs share one validated locator.
+from "./api.wm" import * as Api;
+from "./xrpc.wm" import * as Xrpc;
+from "./views.wm" import * as Views;
+
+record PostLocation = { actor: String, key: String };
+record ResolvedHandle = { did: String };
+
+let before = (text: String, separator) => {
+  text :> .split(separator) :> Result.map((parts) => {
+    List.at(Js.Array.toList(parts), 0) :> Option.getOr(text)
+  })
+};
+let parse = (input: String) => {
+  input :> .trim() :> Result.andThen((text) => { before(text, "#") })
+    :> Result.andThen((text) => { before(text, "?") })
+    :> Result.andThen((text) => {
+      text :> .endsWith("/") :> Result.andThen((trailing) => {
+        if (trailing) { text :> .slice(0, -1) } else { Ok(text) }
+      })
+    }) :> Result.andThen((text) => { text :> .split("/") })
+    :> Result.map(Js.Array.toList) :> Result.mapErr(Xrpc.JavaScriptFailure)
+    :> Result.andThen((parts) => {
+      let location = match(parts) {
+        ["https:", "", "bsky.app", "profile", actor, "post", key] => { Some(PostLocation(actor, key)) },
+        ["at:", "", actor, "app.bsky.feed.post", key] => { Some(PostLocation(actor, key)) },
+        _ => { None },
+      };
+      match(location) {
+        Some(value) => {
+          if (value.actor != "" && value.key != "") { Ok(value) } else {
+            Err(Xrpc.ConfigFailure("post URL must include an actor and record key"))
+          }
+        },
+        None => { Err(Xrpc.ConfigFailure("expected https://bsky.app/profile/<actor>/post/<key> or at://<actor>/app.bsky.feed.post/<key>")) },
+      }
+    })
+};
+let uri = (location: PostLocation) => {
+  let isDid = location.actor :> .startsWith("did:") :> Result.mapErr(Xrpc.JavaScriptFailure);
+  isDid :> Task.fromResult :> Task.andThen((did) => {
+    let actor = if (did) { Task.succeed(location.actor) } else {
+      Api.query(Xrpc.appView, None, "com.atproto.identity.resolveHandle", [Xrpc.QueryParam("handle", location.actor)])
+        :> Task.andThen((body) => {
+          let resolved: Result<ResolvedHandle, Js.Error> = body :> Json.assert;
+          resolved :> Result.map((value) => { value.did })
+            :> Result.mapErr(Xrpc.ResponseShapeFailure) :> Task.fromResult
+        })
+    };
+    actor :> Task.map((value) => { "at://" ++ value ++ "/app.bsky.feed.post/" ++ location.key })
+  })
+};
+let fetchPost = (url) => {
+  parse(url) :> Task.fromResult :> Task.andThen(uri)
+    :> Task.andThen((value) => { Api.thread(value, 0) })
+    :> Task.andThen((value) => {
+      match(value) {
+        Views.ThreadPost(post, _) => { Task.succeed(post) },
+        Views.MissingPost(_) => { Task.fail(Xrpc.ConfigFailure("post not found")) },
+        Views.BlockedPost(_) => { Task.fail(Xrpc.ConfigFailure("post is blocked")) },
+        Views.UnknownThread(_) => { Task.fail(Xrpc.ConfigFailure("unsupported post response")) },
+      }
+    })
+};

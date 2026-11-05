@@ -1,0 +1,4 @@
+-- Preserve the ordinary Text namespace while allowing show(Text).
+export from "basis/text.wm" import *;
+let of = Text.of;
+let carrier = (value) => { print(value); Task.succeed(void) };

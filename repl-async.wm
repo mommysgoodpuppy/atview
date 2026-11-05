@@ -1,0 +1,86 @@
+-- Importable Bluesky browsing API. Importing this module performs no I/O.
+from "./proto/api.wm" import * as Api;
+from "./proto/auth.wm" import * as Auth;
+from "./proto/feed-tabs.wm" import * as Feeds;
+
+export from "./proto/views.wm" import * as Views;
+export from "./proto/xrpc.wm" import { describeError };
+export from "./proto/post-url.wm" import { fetchPost };
+export from "./tui/inline-image.wm" import * as Image;
+export from "./util/repl-text.wm" import * as Text;
+
+-- Renderers are ordinary functions, usable with task :> show(Image).
+let show = (task, renderer) => {
+  task :> Task.andThen(renderer) :> Task.recover((error) => {
+    print(describeError(error))
+  })
+};
+
+-- One-argument inspection, matching the original REPL helper.
+let inspect = (task) => {
+  task :> Task.map(print) :> Task.recover((error) => {
+    print(describeError(error))
+  })
+};
+
+-- Keep tokens behind a function so inspecting an account does not print JWTs.
+record Account = { handle: String, did: String, session: Void -> Auth.Session };
+
+let account = (session: Auth.Session) => {
+  Account(session.handle, session.did, () => { session })
+};
+
+let login = () => { Auth.login() :> Task.map(account) };
+let refresh = (signedIn: Task<Account, error>) => {
+  signedIn :> Task.andThen((user) => {
+    Auth.refreshSession(user.session()) :> Task.map(account)
+  })
+};
+
+let profile = (actor) => { Api.profile(actor) };
+let feed = (actor, limit) => { Api.authorFeed(actor, limit) };
+let feedPage = (actor, limit, cursor) => { Api.authorFeedPage(actor, limit, cursor) };
+let thread = (uri, depth) => { Api.thread(uri, depth) };
+
+-- Authenticated calls take the login Task itself: no await or token plumbing.
+let timeline = (signedIn: Task<Account, error>, limit, cursor) => {
+  signedIn :> Task.andThen((user) => {
+    let session = user.session();
+    Api.timelinePage(session.accessJwt, limit, cursor)
+  })
+};
+let myPosts = (signedIn: Task<Account, error>, limit, cursor) => {
+  signedIn :> Task.andThen((user) => {
+    let session = user.session();
+    Api.authorFeedPageAuthenticated(session.accessJwt, user.did, limit, cursor)
+  })
+};
+let search = (signedIn: Task<Account, error>, term, limit) => {
+  signedIn :> Task.andThen((user) => {
+    Api.searchPostsAuthenticated(user.session(), term, limit)
+  })
+};
+let authenticatedFeed = (signedIn: Task<Account, error>, actor, limit, cursor) => {
+  signedIn :> Task.andThen((user) => {
+    let session = user.session();
+    Api.authorFeedPageAuthenticated(session.accessJwt, actor, limit, cursor)
+  })
+};
+let authenticatedThread = (signedIn: Task<Account, error>, uri, depth) => {
+  signedIn :> Task.andThen((user) => {
+    let session = user.session();
+    Api.threadAuthenticated(session.accessJwt, uri, depth)
+  })
+};
+let pinnedFeeds = (signedIn: Task<Account, error>) => {
+  signedIn :> Task.andThen((user) => {
+    let session = user.session();
+    Feeds.pinnedFeeds(session.accessJwt)
+  })
+};
+let pinnedPage = (signedIn: Task<Account, error>, kind, uri, limit, cursor) => {
+  signedIn :> Task.andThen((user) => {
+    let session = user.session();
+    Feeds.page(session.accessJwt, kind, uri, limit, cursor)
+  })
+};

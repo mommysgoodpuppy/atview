@@ -1,0 +1,19 @@
+from "./post-url.wm" import * as Url;
+from "./xrpc.wm" import { describeError };
+let expect = (condition, label) => { if (condition) { void } else { Panic(label) } };
+let main = () => {
+  let web = Url.parse(" https://bsky.app/profile/test.example/post/abc/?ref=test#fragment ") :> Result.debug;
+  expect(web.actor == "test.example" && web.key == "abc", "web URL must retain actor/key and strip query, fragment, trailing slash");
+  let at = Url.parse("at://did:plc:test/app.bsky.feed.post/abc") :> Result.debug;
+  expect(at.actor == "did:plc:test" && at.key == "abc", "AT URI must retain DID/key");
+  let invalid = ["", "https://example.com/profile/a/post/b", "https://bsky.app/profile/a", "at://a/app.bsky.feed.like/b", "https://bsky.app/profile//post/b", "https://bsky.app/profile/a/post/b/extra"];
+  List.map(invalid, (url) => {
+    expect(match(Url.parse(url)) { Err(_) => { true }, _ => { false } }, "invalid post URL must fail")
+  });
+  Url.fetchPost("invalid") :> Task.map((_) => { Panic("invalid URL must not fetch") })
+    :> Task.orElse((error) => {
+      expect(describeError(error) != "", "invalid URL must have a readable error");
+      print("post URL probe passed");
+      Task.succeed(void)
+    })
+};

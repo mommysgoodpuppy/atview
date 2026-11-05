@@ -95,6 +95,85 @@ immediately; obsolete image placements are discarded and encoded output is cache
 half-block crops reuse position-independent prepared rows, including on the first scroll through a
 new crop; clipping does not rescale the image.
 
+## Bluesky in the WM REPL
+
+See the [REPL guide](docs/repl.md) for username → feed → filter → first image,
+pagination, authentication, and scripts.
+
+Start `wm repl` from this repository:
+
+```wm
+from "../repl.wm" import *;
+feed("atproto.com", 30).posts
+  :> List.map(post => post.text)
+  :> show(Text);
+```
+
+Queries return completed typed values: no Task callbacks or explicit wait call.
+`show(Image)` accepts a completed post, and `show(Image.source)` accepts its
+`post.image`:
+
+```wm
+"https://bsky.app/profile/HANDLE/post/POST_KEY" :> fetchPost :> show(Image);
+```
+
+Replace the URL placeholders. The default API invokes the existing Workman
+protocol functions in a Workman worker and waits through `Atomics`; image
+loading also completes before rendering. There is no TypeScript shim or second
+implementation of the endpoints. Workers terminate after each call. Importing
+this module starts no worker or network request.
+
+The interactive WM prompt currently resolves relative imports from a temporary
+session subdirectory, hence `../repl.wm`. In a script saved at the repository
+root, use `from "./repl.wm" import *;`.
+
+| Function | Completed result/use |
+| --- | --- |
+| `profile(actor)` | Public profile by handle or DID |
+| `feed(actor, limit)` / `feedPage(actor, limit, cursor)` | Author-feed page, including reposts and replies |
+| `thread(uri, depth)` | Post thread and replies |
+| `fetchPost(url)` | One post from a Bluesky link or AT URI |
+| `login()` / `refresh(me)` | Account loaded from `.env`; refreshed account |
+| `timeline(me, limit, cursor)` | Following timeline page |
+| `myPosts(me, limit, cursor)` | Signed-in account's author feed |
+| `search(me, term, limit)` | Search results |
+| `authenticatedFeed(me, actor, limit, cursor)` | Author feed with viewer state |
+| `authenticatedThread(me, uri, depth)` | Thread with viewer state |
+| `pinnedFeeds(me)` | Pinned feeds and lists (`kind`, `uri`, `title`) |
+| `pinnedPage(me, kind, uri, limit, cursor)` | Pinned feed/list page (flattened feed posts) |
+| `show(value, renderer)` | Print with `Text` or render a post's first image with `Image` |
+| `inspect(value)` | Print a completed value |
+
+Pagination uses `None` for the first page and the returned `Option<String>`
+cursor for the next. `Views` contains the nominal view types and thread
+constructors for pattern matching. Failures stop the current evaluation with a
+readable error. For concurrency and typed error handling, the original Task
+interface is preserved under `Async` and in `repl-async.wm`:
+
+```wm
+Async.feed("atproto.com", 5) :> Async.show(Async.Text);
+```
+
+Authenticated helpers use `bsky.social`, like the existing CLI/TUI. Account
+inspection shows the handle and DID, with JWTs held behind a function.
+
+Images use Kitty, sixel, or colored half blocks. Set
+`ATVIEW_IMAGE_BACKEND=kitty|sixel|half` before launching to choose a backend.
+The inline preview fits within 80 columns and 20 rows (smaller on a small
+terminal), using an estimated 8×16 pixel cell size. Only the first image is
+rendered; videos are not supported.
+
+**WM re-evaluates earlier interactive phrases on each new phrase.** Reads,
+logins, and images can repeat, and previous results can change. Use `wm run`
+with a script for one-time execution. The synchronous facade does not make the
+session persistent, and the optional async interface still has WM's known
+asynchronous replay-output limitation. Posting, liking, and other writes are
+excluded from this facade.
+
+Offline checks: `wm run util/sync-rpc-probe.wm`,
+`ATVIEW_IMAGE_BACKEND=half wm run app/repl-sync-probe.wm`,
+`wm run proto/post-url-probe.wm`, and the existing image-worker/crop probes.
+
 ## Configuration
 
 The TUI reads `atview.won` from the directory where you launch it. Settings use

@@ -1,0 +1,78 @@
+-- Scrollback-friendly image output: no absolute positioning or alternate screen.
+from "./ansi.wm" import * as Ansi;
+from "./geometry.wm" import * as Geometry;
+from "./image.wm" import * as Raster;
+from "./kitty.wm" import * as Kitty;
+from "./sixel.wm" import * as Sixel;
+from "./halfblock.wm" import * as Half;
+from "./terminal-cap.wm" import * as Cap;
+from "../proto/views.wm" import * as Views;
+from "../proto/xrpc.wm" import * as Xrpc;
+from js.global("Deno") import { consoleSize };
+
+record ConsoleSize = { columns: Number, rows: Number };
+let terminalSize = () => {
+  consoleSize() :> Result.andThen((raw) => {
+    let size: Result<ConsoleSize, Js.Error> = raw :> Json.assert;
+    size
+  }) :> Result.map((size) => { Geometry.Size(size.columns, size.rows, 8, 16) })
+    :> Result.getOr(Geometry.Size(80, 24, 8, 16))
+};
+let rec lines = match(rows) => {
+  [] => { "" },
+  [head, ..tail] => { head ++ "\r\n" ++ lines(tail) },
+};
+let rec blankRows = (count) => {
+  if (count <= 0) { "" } else { "\r\n" ++ blankRows(count - 1) }
+};
+let render = (terminal: Geometry.Size, image: Raster.Image) => {
+  let columns = Geometry.clamp(1, 80, terminal.width - 1);
+  let maximum = Geometry.clamp(1, 20, terminal.height - 4);
+  let rows = Raster.fitRows(columns, maximum, terminal, image);
+  let area = Geometry.rect(0, 0, columns, rows);
+  match(Cap.renderer) {
+    Cap.KittyRenderer => {
+      let placement = Kitty.fitPlacement(area, terminal, image);
+      "\r" ++ Kitty.transmitChunks(image.base64, true, placement, 0) ++ blankRows(rows)
+    },
+    Cap.SixelRenderer => {
+      match(image.pixels) {
+        None => { "" },
+        Some(pixels) => {
+          let target = Sixel.placement(area, terminal, Raster.Fit, pixels);
+          match(Sixel.buildIndexed(pixels, target)) {
+            None => { "" },
+            Some(indexed) => {
+              let strips = Sixel.rowRasters(indexed, target.width, target.height, terminal.cellHeight);
+              "\r" ++ lines(strips :> List.map((strip) => {
+                Ansi.esc ++ "7" ++ strip ++ Ansi.esc ++ "8"
+              }))
+            },
+          }
+        },
+      }
+    },
+    Cap.HalfBlockRenderer => {
+      match(image.pixels) {
+        None => { "" },
+        Some(pixels) => {
+          let target = Half.viewportTarget(area, area, Raster.Fit, pixels.width, pixels.height);
+          "\r" ++ lines(Half.rasterRows(target, pixels))
+        },
+      }
+    },
+  }
+};
+-- Each step works alone: post.image -> load -> text -> draw. show(Image.source)
+-- starts from an image, and show(Image) starts from a post.
+let text = (image: Raster.Image) => { render(terminalSize(), image) };
+let draw = (image: Raster.Image) => { print(text(image)) };
+let load = (source: Views.PostImage) => { Kitty.loadPng(source.fullsize, source.alt) };
+let source = (source: Views.PostImage) => { load(source) :> Task.map(draw) };
+let display = (post: Views.Post) => {
+  match(post.image) {
+    None => { Task.fail(Xrpc.ConfigFailure("post has no image")) },
+    Some(image) => { source(image) },
+  }
+};
+let carrier = display;

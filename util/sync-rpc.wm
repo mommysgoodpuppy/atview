@@ -1,0 +1,119 @@
+-- Generic Workman-worker RPC. Shared memory carries UTF-8, not WM runtime tags.
+from "./shared-cells.wm" import * as Shared;
+from js.global import { Worker, SharedArrayBuffer, TextEncoder, TextDecoder };
+from js.global("Atomics") import { wait, load, store, notify };
+from js.global("Reflect") import { get, set };
+from js.global("Uint8Array") import unsafe { prototype as bytePrototype: Js.Value };
+from js.global("Reflect") import unsafe { get as rawGet: (Js.Value, String) -> Js.Value };
+from js.global("Reflect") import unsafe { apply as applyBytes: (Js.Value, Js.Value, Js.Value) -> Void };
+let byteSet = rawGet(bytePrototype, "set");
+from js.global("JSON") import { parse };
+from js.global("JSON") import unsafe { stringify: Js.Value -> String } as JSON;
+
+record Request = { phase: String, name: String, body: String, signal: SharedArrayBuffer, output: SharedArrayBuffer };
+record Reply = { ok: Bool, body: String, error: String };
+
+let describeJs = match(error) => {
+  Js.Error(message) => { message },
+  Js.Unknown => { "unknown host error" },
+};
+let awaitReady = (cells) => {
+  wait(cells, 0, 0, 30000) :> Result.andThen((status) => {
+    if (status == "timed-out") { Err(Js.Error("worker request timed out")) } else {
+      load(cells, 0) :> Result.andThen((state) => {
+        if (state == 1) { Ok(void) } else { Err(Js.Error("invalid worker completion state")) }
+      })
+    }
+  })
+};
+let connect = (worker) => {
+  SharedArrayBuffer.new(8) :> Result.andThen((signal) => {
+    Shared.cells(signal) :> Result.andThen((cells) => {
+      let rec ping = (remaining) => {
+        if (remaining <= 0) { Err(Js.Error("worker initialization timed out")) } else {
+          worker :> .postMessage(JSON{ phase: "hello", name: "", body: "", signal: signal, output: signal })
+            :> Result.andThen((_) => { wait(cells, 0, 0, 100) })
+            :> Result.andThen((_) => { load(cells, 0) }) :> Result.andThen((state) => {
+              if (state == 1) { Ok(void) } else { ping(remaining - 1) }
+            })
+        }
+      };
+      ping(300)
+    })
+  })
+};
+let exchange = (worker, name, body, signal, cells) => {
+  worker :> .postMessage(JSON{ phase: "run", name: name, body: body, signal: signal, output: signal })
+    :> Result.andThen((_) => { awaitReady(cells) })
+    :> Result.andThen((_) => { load(cells, 1) })
+    :> Result.andThen((size) => { SharedArrayBuffer.new(size) })
+    :> Result.andThen((output) => {
+      store(cells, 0, 0) :> Result.andThen((_) => {
+        worker :> .postMessage(JSON{ phase: "collect", name: "", body: "", signal: signal, output: output })
+      }) :> Result.andThen((_) => { awaitReady(cells) }) :> Result.andThen((_) => {
+        Shared.bytes(output) :> Result.andThen((bytes) => {
+          TextDecoder.new() :> Result.andThen((decoder) => { decoder :> .decode(bytes) })
+        })
+      })
+    })
+};
+let call = (url, name, body) => {
+  Worker.new(url, JSON{ "type": "module" }) :> Result.andThen((worker) => {
+    let result = connect(worker) :> Result.andThen((_) => { SharedArrayBuffer.new(8) }) :> Result.andThen((signal) => {
+      Shared.cells(signal) :> Result.andThen((cells) => { exchange(worker, name, body, signal, cells) })
+    });
+    -- Terminate on success, failure, and timeout, so the facade never owns a
+    -- live background worker after a synchronous call has returned.
+    let _ = worker :> .terminate();
+    result
+  }) :> Result.mapErr(describeJs) :> Result.andThen((text) => {
+    parse(text) :> Result.andThen((raw) => {
+      let reply: Result<Reply, Js.Error> = raw :> Json.assert;
+      reply
+    }) :> Result.mapErr(describeJs) :> Result.andThen((reply) => {
+      if (reply.ok) { Ok(reply.body) } else { Err(reply.error) }
+    })
+  })
+};
+
+-- One worker is owned by each call. Retain the completed string until the
+-- caller allocates an exact-size output buffer; collection does not rerun work.
+let replySlot = JSON{ text: "" };
+let hello = (request: Request) => {
+  Shared.cells(request.signal) :> Result.andThen((cells) => {
+    store(cells, 0, 1) :> Result.andThen((_) => { notify(cells, 0, 1) })
+  })
+};
+let ready = (request: Request, text) => {
+  set(replySlot, "text", text) :> Result.andThen((_) => {
+    TextEncoder.new() :> Result.andThen((encoder) => { encoder :> .encode(text) })
+  }) :> Result.andThen((encoded) => { encoded :> .byteLength })
+    :> Result.andThen((size) => {
+      Shared.cells(request.signal) :> Result.andThen((cells) => {
+        store(cells, 1, size) :> Result.andThen((_) => { store(cells, 0, 1) })
+          :> Result.andThen((_) => { notify(cells, 0, 1) })
+      })
+    })
+};
+let complete = (request, result) => {
+  let text = match(result) {
+    Ok(body) => { JSON.stringify(JSON{ ok: true, body: body, error: "" }) },
+    Err(error) => { JSON.stringify(JSON{ ok: false, body: "", error: error }) },
+  };
+  ready(request, text)
+};
+let collect = (request: Request) => {
+  let text: Result<String, Js.Error> = get(replySlot, "text") :> Result.andThen(Json.assert);
+  text :> Result.andThen((text) => {
+    TextEncoder.new() :> Result.andThen((encoder) => { encoder :> .encode(text) })
+  }) :> Result.andThen((encoded) => {
+    Shared.bytes(request.output) :> Result.map((target) => {
+      applyBytes(byteSet, target, JSON[encoded]);
+      void
+    })
+  }) :> Result.andThen((_) => {
+    Shared.cells(request.signal) :> Result.andThen((cells) => {
+      store(cells, 0, 1) :> Result.andThen((_) => { notify(cells, 0, 1) })
+    })
+  })
+};

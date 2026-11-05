@@ -1,0 +1,14 @@
+from js.worker("./repl-worker.wm") import { url } as Artifact;
+from "../util/sync-rpc.wm" import * as Rpc;
+from js.global("Reflect") import { get, set };
+let host = JSON{ url: Artifact.url };
+-- Internal transport injection: probes use the real dispatcher with fake I/O.
+let useWorker = (url: String) => { set(host, "url", url) :> Result.debug; void };
+let call = (name, body: String) => {
+  let url: Result<String, Js.Error> = get(host, "url") :> Result.andThen(Json.assert);
+  url :> Result.mapErr(Rpc.describeJs) :> Result.andThen((url) => { Rpc.call(url, name, body) })
+};
+let value = match(result) => {
+  Ok(value) => { value },
+  Err(error) => { Panic(error) },
+};
