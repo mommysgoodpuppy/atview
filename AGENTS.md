@@ -5,7 +5,7 @@ A direct AT Protocol AppView CLI, terminal UI and REPL API written in Workman.
 - `docs/`: settled user-facing documentation. Start with `README.md`, then `docs/repl.md` for the
   REPL API.
 - `markdown/`: plans, work in progress and notes that should outlast a session. Start with
-  `markdown/repl-sync.md`. Keep project memory here, not in a harness's own memory system (Claude
+  `markdown/repl-design.md` for how the REPL should feel. Keep project memory here, not in a harness's own memory system (Claude
   Code memory, Codex memories and the like).
 - Use `_scratch/` for agent scratch files, experiments and local test artifacts. It is ignored by
   Git. Global tmp may be used but is not persistent; project-local, don't use `project/tmp/` or
