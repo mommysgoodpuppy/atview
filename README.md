@@ -104,7 +104,7 @@ Start `wm repl` from this repository:
 
 ```wm
 from "../repl.wm" import *;
-feed("atproto.com", 30).posts
+readFeed(author("atproto.com"), 30).posts
   :> List.map(post => post.text)
   :> show(Text);
 ```
@@ -130,7 +130,7 @@ root, use `from "./repl.wm" import *;`.
 | Function | Completed result/use |
 | --- | --- |
 | `profile(actor)` | Public profile by handle or DID |
-| `feed(actor, limit)` / `feedPage(actor, limit, cursor)` | Author-feed page, including reposts and replies |
+| `readFeed(author(actor), limit)` / `readFeedPage(feed, limit, cursor)` | Author-feed page, including reposts and replies |
 | `thread(uri, depth)` | Post thread and replies |
 | `fetchPost(url)` | One post from a Bluesky link or AT URI |
 | `login()` / `refresh(me)` | Account loaded from `.env`; refreshed account |
@@ -139,6 +139,7 @@ root, use `from "./repl.wm" import *;`.
 | `search(me, term, limit)` | Search results |
 | `authenticatedFeed(me, actor, limit, cursor)` | Author feed with viewer state |
 | `authenticatedThread(me, uri, depth)` | Thread with viewer state |
+| `feeds(me)` | Following, then pinned feeds and lists, as `Feed` values for `readFeed` |
 | `pinnedFeeds(me)` | Pinned feeds and lists (`kind`, `uri`, `title`) |
 | `pinnedPage(me, kind, uri, limit, cursor)` | Pinned feed/list page (flattened feed posts) |
 | `show(value, renderer)` | Print with `Text` or render a post's first image with `Image` |
@@ -151,7 +152,7 @@ readable error. For concurrency and typed error handling, the original Task
 interface is preserved under `Async` and in `repl-async.wm`:
 
 ```wm
-Async.feed("atproto.com", 5) :> Async.show(Async.Text);
+Async.readFeed(Async.author("atproto.com"), 5) :> Async.show(Async.Text);
 ```
 
 Authenticated helpers use `bsky.social`, like the existing CLI/TUI. Account

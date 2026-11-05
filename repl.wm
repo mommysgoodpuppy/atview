@@ -6,6 +6,7 @@ from "./proto/auth.wm" import * as Auth;
 export from "./proto/views.wm" import * as Views;
 export from "./proto/xrpc.wm" import { describeError };
 export from "./tui/repl-image.wm" import * as Image;
+export from "./util/repl-value-post.wm" import * as Post;
 export from "./util/repl-value-text.wm" import * as Text;
 export from "./repl-async.wm" import * as Async;
 
@@ -13,10 +14,18 @@ let show = (value, renderer) => { renderer(value) };
 let inspect = (value) => { print(value) };
 let hasCursor = match(cursor) => { None => { false }, Some(_) => { true } };
 let profile = (actor) => { Client.call("profile", JSON.stringify(JSON{ actor: actor })) :> Result.andThen(Codec.decodeProfile) :> Client.value };
-let feedPage = (actor, limit, cursor) => {
+let authorPage = (actor, limit, cursor) => {
   Client.call("feed", JSON.stringify(JSON{ actor: actor, limit: limit, cursor: cursor :> Option.getOr(""), cursorSet: hasCursor(cursor) })) :> Result.andThen(Codec.decodeFeed) :> Client.value
 };
-let feed = (actor, limit) => { feedPage(actor, limit, None) };
+
+-- A feed is a value that knows how to read itself, so it can be chosen from a
+-- list and passed along a pipeline. Signed-in feeds keep the session inside read.
+record Feed = { title: String, kind: String, read: (Number, Option<String>) -> Views.AuthorFeed };
+let author = (actor: String) => {
+  Feed(actor, "author", (limit, cursor) => { authorPage(actor, limit, cursor) })
+};
+let readFeed = (source: Feed, limit) => { source.read(limit, None) };
+let readFeedPage = (source: Feed, limit, cursor) => { source.read(limit, cursor) };
 let thread = (uri, depth) => { Client.call("thread", JSON.stringify(JSON{ uri: uri, depth: depth })) :> Result.andThen(Codec.decodeThread) :> Client.value };
 let fetchPost = (url) => { Client.call("fetchPost", JSON.stringify(JSON{ uri: url })) :> Result.andThen(Codec.decodePost) :> Client.value };
 
@@ -41,6 +50,17 @@ let authenticatedThread = (user: Account, uri, depth) => {
   Client.call("authenticatedThread", JSON.stringify(JSON{ session: sessionValue(user), uri: uri, depth: depth })) :> Result.andThen(Codec.decodeThread) :> Client.value
 };
 let pinnedFeeds = (user: Account) => { Client.call("pinnedFeeds", JSON.stringify(JSON{ session: sessionValue(user) })) :> Result.andThen(Codec.decodeSavedFeeds) :> Client.value };
+let pinnedFeed = (user: Account, kind, uri, limit, cursor) => {
+  Client.call("pinnedFeed", JSON.stringify(JSON{ session: sessionValue(user), kind: kind, uri: uri, limit: limit, cursor: cursor :> Option.getOr(""), cursorSet: hasCursor(cursor) })) :> Result.andThen(Codec.decodeFeed) :> Client.value
+};
+-- Following first, then the account's pinned feeds and lists.
+let feeds = (user: Account) => {
+  let following = Feed("Following", "timeline", (limit, cursor) => { timeline(user, limit, cursor) });
+  let pinned = pinnedFeeds(user) :> map((saved) => {
+    Feed(saved.title, saved.kind, (limit, cursor) => { pinnedFeed(user, saved.kind, saved.uri, limit, cursor) })
+  });
+  [following, ..pinned]
+};
 let pinnedPage = (user: Account, kind, uri, limit, cursor) => {
   Client.call("pinnedPage", JSON.stringify(JSON{ session: sessionValue(user), kind: kind, uri: uri, limit: limit, cursor: cursor :> Option.getOr(""), cursorSet: hasCursor(cursor) })) :> Result.andThen(Codec.decodeFlatPage) :> Client.value
 };

@@ -1,0 +1,9 @@
+-- The Task version of util/repl-value-post.wm.
+from "../tui/inline-image.wm" import * as Inline;
+from "../tui/geometry.wm" import * as Geometry;
+from "./post-text.wm" import * as PostText;
+-- Wrap to the terminal, but no wider than 80 columns.
+let width = () => { Geometry.clamp(1, 80, Inline.terminalSize().width - 1) };
+let lines = PostText.lines;
+let text = (post) => { PostText.text(width(), post) };
+let carrier = (post) => { print(text(post)); Task.succeed(void) };

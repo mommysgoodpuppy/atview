@@ -7,12 +7,12 @@ let expect = (condition, label) => { if (condition) { void } else { Panic(label)
 let hasImage = (post: Views.Post) => { match(post.image) { Some(_) => { true }, None => { false } } };
 let main = () => {
   Client.useWorker(Fixture.url);
-  let author = profile("test.example");
-  expect(author.did == "did:plc:test" && author.displayName == None, "profile and canonical None must survive transfer");
-  let page = feed(author.did, 30);
+  let person = profile("test.example");
+  expect(person.did == "did:plc:test" && person.displayName == None, "profile and canonical None must survive transfer");
+  let page = readFeed(author(person.did), 30);
   expect(List.length(page.posts) == 3 && page.cursor == Some("next-page"), "feed list and cursor must survive transfer");
   let selected = page.posts
-    :> List.filter((post) => { post.author.did == author.did })
+    :> List.filter((post) => { post.author.did == person.did })
     :> List.filter(hasImage) :> List.at(0) :> Option.toResult("no image found") :> Result.debug;
   expect(selected.uri == "at://did:plc:test/app.bsky.feed.post/image", "ordinary list composition must skip reposts and text posts");
   expect(selected.text == "hello \"quoted\" 🦋\nsecond line", "JSON transport must escape Unicode, quotes, and newlines");
@@ -21,9 +21,9 @@ let main = () => {
   expect(match(Image.display(textPost)) {
     Err(message) => { message == "post has no image" }, _ => { false },
   }, "text-only posts must fail without trying to load an image");
-  let next = feedPage(author.did, 30, page.cursor);
+  let next = readFeedPage(author(person.did), 30, page.cursor);
   expect(List.length(next.posts) == 0 && next.cursor == None, "empty list and None must be real local values");
-  let emptyCursor = feedPage(author.did, 30, Some(""));
+  let emptyCursor = readFeedPage(author(person.did), 30, Some(""));
   expect(List.length(emptyCursor.posts) == 0, "Some(empty cursor) must not be collapsed into None");
   let fetched = fetchPost("https://bsky.app/profile/test.example/post/image");
   expect(fetched.uri == selected.uri, "fetchPost must reuse existing resolution and thread API");
@@ -39,7 +39,7 @@ let main = () => {
   let failed = Client.call("profile", "{\"actor\":\"error.example\"}") :> Result.andThen(Codec.decodeProfile);
   expect(match(failed) { Err(message) => { message :> .includes("HTTP 404") :> Result.getOr(false) }, _ => { false } }, "HTTP errors must return across the worker boundary");
   let me = login();
-  expect(me.did == author.did, "login returns a completed Account");
+  expect(me.did == person.did, "login returns a completed Account");
   let printed = Text.of(me);
   expect(!(printed :> .includes("fake-access") :> Result.getOr(true)), "account inspection must not expose JWTs");
   let refreshed = refresh(me);
@@ -54,8 +54,29 @@ let main = () => {
   let saved = pinnedFeeds(me);
   expect(match(saved) { [item] => { item.title == "Fixture feed" }, _ => { false } }, "pinned-feed hydration must reuse the existing implementation");
   let pinned = pinnedPage(me, "feed", "at://feed", 30, None);
+  expect((feeds(me) :> map((item) => { item.title })) == ["Following", "Fixture feed"], "feeds must list Following, then pinned feeds");
+  let chosen = login() :> feeds :> List.find((item) => { item.title == "Fixture feed" }) :> Option.valOf :> Result.debug :> readFeed(3).posts;
+  expect(List.length(chosen) == 3, "a chosen feed must read full posts");
+  chosen :> map(post => post :> show(Post));
+  expect(List.length(readFeed(feeds(me) :> List.hd :> Result.debug, 30).posts) == 3, "Following must read the timeline");
   expect(List.length(pinned.posts) == 3, "pinned pages must preserve their flattened API shape");
   selected :> show(Image);
+  let textOnly = page.posts :> List.find((post) => { !hasImage(post) })
+    :> Option.toResult("no text post") :> Result.debug;
+  expect(Post.text(selected) :> .includes("<image>") :> Result.debug, "show(Post) must mark an image");
+  expect(!(Post.text(textOnly) :> .includes("<image>") :> Result.debug), "a text post must have no image marker");
+  let hostile = .{ ..textOnly, text = "safe\u{1b}[2Jtext\nnext" };
+  expect(!(Post.text(hostile) :> .includes("\u{1b}") :> Result.debug), "post text must not reach the terminal with control characters");
+  expect(Post.text(hostile) :> .includes("safe[2Jtext\nnext") :> Result.debug, "cleaning must keep text and newlines");
+  let long = .{ ..textOnly, text = "one two three four five six seven eight nine ten eleven" };
+  let wrapped = Post.lines(20, long);
+  expect(List.length(wrapped) > 3, "Post.lines must wrap long text");
+  expect(wrapped :> List.all((line) => { (line :> .length :> Result.getOr(99)) <= 20 }), "wrapped lines must fit the width");
+  page.posts :> List.map(post => post :> show(Post));
+  page.posts :> List.map(post => {
+    post :> show(Post);
+    post.image :> Option.app(show(_, Image.source))
+  });
   let first = page.posts :> List.findMap((post) => { post.image })
     :> Option.toResult("no image found") :> Result.debug;
   let loaded = first :> Image.load;

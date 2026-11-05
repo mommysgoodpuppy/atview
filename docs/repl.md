@@ -12,7 +12,7 @@ Start `wm repl` from the atview directory and enter:
 from "../repl.wm" import *;
 
 profile("hotbloodedheroine.petplay.fi").did
-  :> feed(30).posts
+  :> author :> readFeed(30).posts
   :> List.findMap(post => post.image)
   :> match {
     Some(image) => image :> show(Image.source),
@@ -41,7 +41,7 @@ Save this as `browse.wm`, replace the handle, and run `wm run browse.wm`:
 from "./repl.wm" import *;
 let main = () => {
   profile("username.bsky.social").did
-    :> feed(30).posts
+    :> author :> readFeed(30).posts
     :> List.findMap(post => post.image)
     :> match {
       Some(image) => image :> show(Image.source),
@@ -52,7 +52,7 @@ let main = () => {
 
 `List.findMap` returns the first image it finds, and `show(Image.source)` draws it.
 Use `List.mapPartial` instead if you want every image. Call-result selectors
-also work after a pipe: `did :> feed(30).posts` gets the page's posts directly.
+also work after a pipe: `did :> author :> readFeed(30).posts` gets the page's posts directly.
 There are no special "newest post" or "image post" helpers.
 
 ## Exclude reposts
@@ -62,7 +62,7 @@ When you need the resolved DID again in a predicate, bind it once:
 ```wm
 let did = profile("username.bsky.social").did;
 did
-  :> feed(30).posts
+  :> author :> readFeed(30).posts
   :> List.filter(post => post.author.did == did)
   :> List.findMap(post => post.image)
   :> match {
@@ -75,6 +75,46 @@ Replies still count as authored posts. Pins are excluded by the feed query.
 To select the newest authored post whether or not it has an image, use
 `List.at(0)` and `show(Image)`, which takes a whole post. Rendering a text-only
 post reports `post has no image`.
+
+## Choose a feed
+
+A feed is a value: `author(handle)` is someone's posts, and `feeds(me)` lists your
+Following timeline and pinned feeds. Pick one the way you'd pick anything from a
+list, then read it:
+
+```wm
+login() :> feeds
+  :> List.find(feed => feed.title == "For You")
+  :> Option.valOf :> Result.debug
+  :> readFeed(3).posts
+  :> map(post => post :> show(Post));
+```
+
+`Option.valOf` is SML's `valOf`: it reports a missing feed as `Err(Option)`, and
+`Result.debug` stops there, like an uncaught exception. Use
+`feeds(me) :> map(feed => feed.title)` to see the names.
+
+## Read posts
+
+`show` takes a value and something that can show it, such as `Post`, `Image` or
+`Text`. `Post` prints a post as text, with `<image>` where it has an image, and
+downloads nothing:
+
+```wm
+readFeed(author("username.bsky.social"), 3).posts :> map(post => post :> show(Post));
+```
+
+To draw images as well, say so in the lambda:
+
+```wm
+readFeed(author("username.bsky.social"), 3).posts :> map(post => {
+  post :> show(Post);
+  post.image :> Option.app(show(_, Image.source))
+});
+```
+
+`Post.text` returns the text without printing it. Control characters are removed
+from post content, so a post can't send escape sequences to your terminal.
 
 ## Compose image steps
 
@@ -96,7 +136,7 @@ post.image :> Option.map(Image.load) :> Option.map(Image.draw);
 Bind an intermediate result when you want to inspect or reuse it:
 
 ```wm
-let page = feed("username.bsky.social", 30);
+let page = readFeed(author("username.bsky.social"), 30);
 page :> show(Text);
 page.posts :> List.map((post) => { (post.uri, post.text) }) :> show(Text);
 ```
@@ -137,10 +177,10 @@ Pagination is explicit. Keep the returned cursor and request another page when
 you want to scan further:
 
 ```wm
-let first = feedPage("username.bsky.social", 30, None);
+let first = readFeedPage(author("username.bsky.social"), 30, None);
 match(first.cursor) {
   Some(cursor) => {
-    let second = feedPage("username.bsky.social", 30, Some(cursor));
+    let second = readFeedPage(author("username.bsky.social"), 30, Some(cursor));
     second.posts :> show(Text)
   },
   None => { print("No more pages") },
@@ -172,7 +212,7 @@ The original asynchronous interface is available as `Async` or by importing
 `repl-async.wm` directly. For example:
 
 ```wm
-Async.feed("username.bsky.social", 30)
+Async.readFeed(Async.author("username.bsky.social"), 30)
   :> Task.map((page) => { page.posts :> List.map((post) => { post.text }) })
   :> Async.show(Async.Text);
 ```

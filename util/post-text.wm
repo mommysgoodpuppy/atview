@@ -1,0 +1,36 @@
+-- A plain-text view of a post. Post content comes from other people, so control
+-- characters are removed before it can reach the terminal.
+from js.global import { RegExp };
+from "../proto/views.wm" import * as Views;
+from "./wrap.wm" import { postLines };
+
+let clean = (text: String) => {
+  RegExp.new("[\\u0000-\\u0009\\u000b-\\u001f\\u007f-\\u009f]", "g")
+    :> Result.andThen((pattern) => { text :> .replaceAll(pattern, "") })
+    :> Result.debug
+};
+let author = (actor: Views.Actor) => {
+  let handle = "@" ++ clean(actor.handle);
+  match(actor.displayName) {
+    Some(name) => { clean(name) ++ " (" ++ handle ++ ")" },
+    None => { handle },
+  }
+};
+let count = (value) => { Text.of(value :> Option.getOr(0)) };
+-- The post's lines at a given width, without a trailing blank line.
+let lines = (width: Number, post: Views.Post) => {
+  let image = match(post.image) { Some(_) => { ["<image>"] }, None => { [] } };
+  let metrics = count(post.replyCount) ++ " replies   " ++ count(post.repostCount) ++ " reposts   " ++
+    count(post.likeCount) ++ " likes";
+  List.concat([
+    postLines(author(post.author) ++ " · " ++ clean(post.createdAt), width),
+    postLines(clean(post.text), width),
+    image,
+    postLines(metrics, width),
+  ])
+};
+let rec join = match(items) => {
+  [] => { "" },
+  [line, ..rest] => { line ++ "\n" ++ join(rest) },
+};
+let text = (width: Number, post: Views.Post) => { join(lines(width, post)) };

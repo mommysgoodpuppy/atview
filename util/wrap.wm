@@ -1,0 +1,39 @@
+-- Word wrap shared by the terminal UI and the REPL. Widths count UTF-16 units.
+let wrapOnce = (text, width) => {
+  let size = text :> .length :> Result.getOr(0);
+  let newline = text :> .indexOf("\n") :> Result.getOr(-1);
+  if (newline >= 0 && (width <= 0 || newline <= width)) {
+    (
+      text :> .slice(0, newline) :> Result.getOr(""),
+      text :> .slice(newline + 1) :> Result.getOr(""),
+    )
+  } else {
+    if (width <= 0 || size <= width) {
+      (text, "")
+    } else {
+      let candidate = text :> .slice(0, width + 1) :> Result.getOr(text);
+      let space = candidate :> .lastIndexOf(" ") :> Result.getOr(-1);
+      let boundary = if (space <= 0) { width } else { space };
+      let next = if (space <= 0) { boundary } else { boundary + 1 };
+      (
+        text :> .slice(0, boundary) :> Result.getOr(""),
+        text :> .slice(next) :> Result.getOr(""),
+      )
+    }
+  }
+};
+
+let rec wrapLines = match(text, width, remaining) => {
+  (_, _, 0) => { [] },
+  ("", _, _) => { [] },
+  (_, _, _) => {
+    let (line, rest) = wrapOnce(text, width);
+    let next = if (rest == text) { "" } else { rest };
+    [line, ..wrapLines(next, width, remaining - 1)]
+  },
+};
+
+-- The text length bounds the number of rows even at a one-column width.
+let postLines = (text, width) => {
+  wrapLines(text, width, (text :> .length :> Result.getOr(0)) + 1)
+};

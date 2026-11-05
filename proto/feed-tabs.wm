@@ -102,13 +102,17 @@ let pinnedFeeds = (jwt) => {
       feeds :> List.map((feed) => { hydrateTitle(jwt, feed) }) :> Task.collectList
     })
 };
-let page = (jwt, kind, uri, limit, cursor) => {
+-- A pinned feed or list page with full post views.
+let viewPage = (jwt, kind, uri, limit, cursor) => {
   let (method, parameter) = if (kind == "list") {
     ("app.bsky.feed.getListFeed", "list")
   } else { ("app.bsky.feed.getFeed", "feed") };
   Api.query("https://bsky.social", Some(jwt), method, List.append([
     Xrpc.QueryParam(parameter, uri), Xrpc.QueryParam("limit", Text.of(limit)),
-  ], Api.cursorParams(cursor))) :> Api.decodeAuthorFeedT :> Task.map((value) => {
+  ], Api.cursorParams(cursor))) :> Api.decodeAuthorFeedT
+};
+let page = (jwt, kind, uri, limit, cursor) => {
+  viewPage(jwt, kind, uri, limit, cursor) :> Task.map((value) => {
     Api.FeedPage(value.posts :> List.map(Api.feedPost), value.cursor)
   })
 };

@@ -72,6 +72,12 @@ let dispatch = match(name, body) => {
     let input: Result<Login, String> = read(body);
     input :> Task.fromResult :> Task.andThen((input) => { encoded(Feeds.pinnedFeeds(input.session.accessJwt), Codec.savedFeeds) })
   },
+  ("pinnedFeed", _) => {
+    let input: Result<PinnedPage, String> = read(body);
+    input :> Task.fromResult :> Task.andThen((input) => {
+      encoded(Feeds.viewPage(input.session.accessJwt, input.kind, input.uri, input.limit, cursor(input.cursorSet, input.cursor)), Codec.feed)
+    })
+  },
   ("pinnedPage", _) => {
     let input: Result<PinnedPage, String> = read(body);
     input :> Task.fromResult :> Task.andThen((input) => {
