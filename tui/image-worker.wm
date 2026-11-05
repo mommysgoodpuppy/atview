@@ -28,7 +28,7 @@ record Request = {
 
 let encode = (request: Request) => {
   let pixels = if (request.pixels.width > 0) {
-    Buffer.from(request.pixels.bytes) :> Task.fromResult :> Task.map((bytes) => {
+    Buffer.copyBytesFrom(request.pixels.bytes) :> Task.fromResult :> Task.map((bytes) => {
       Png.Pixels(bytes, request.pixels.width, request.pixels.height)
     })
   } else {

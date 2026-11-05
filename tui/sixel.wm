@@ -387,11 +387,12 @@ let indexedRaster = (indexed, width, height) => { indexedRasterMode(indexed, wid
 
 -- Independent cell-row strips support every integer-row viewport crop. They
 -- share one resampled raster, so cropping never changes pixel sampling/scale.
-let rowRasters = (indexed: ByteBuffer, width, height, cellHeight) => {
+let rowRasters = (indexed: ByteBuffer<backing>, width, height, cellHeight) => {
   let rec rows = (y) => {
     if (y >= height || cellHeight <= 0) { [] } else {
       let count = Geometry.clamp(1, cellHeight, height - y);
-      let slice = indexed :> .subarray(y * width, (y + count) * width) :> Result.debug;
+      let slice = Buffer.prototype.subarray.call(indexed, y * width, (y + count) * width)
+        :> Result.andThen((slice) => { Buffer.copyBytesFrom(slice) }) :> Result.debug;
       [indexedRasterMode(slice, width, count, true), ..rows(y + count)]
     }
   };

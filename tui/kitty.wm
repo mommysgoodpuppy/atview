@@ -207,60 +207,36 @@ let pngUrl = (url) => {
 };
 
 let loadPngWithPixels = (url, alt, decodePixels) => {
-  let inspectStatus = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
-    Result|response.ok, response.status|
-      :> Result.map((ok, status) => {
-        (response, ok, status)
-      })
-      :> Task.fromResult
-  };
-  let requireOk = Monad.via Task (response, ok, status) => {
-    if (ok) {
-      Task.succeed(response)
-    } else {
-      response :> .text()
-        :> Task.mapErr(Xrpc.JavaScriptFailure)
-        :> Task.andThen((body) => {
-          Task.fail(Xrpc.HttpFailure(status, body))
-        })
-    }
-  };
-  let readBytes = Monad.viaError Task Xrpc.JavaScriptFailure (response) => {
-    response :> .arrayBuffer()
-  };
-  let decodePng = Monad.via Task (bytes) => {
-    Buffer.from(bytes)
-      :> Result.mapErr(Xrpc.JavaScriptFailure)
-      :> Task.fromResult
-      :> Task.andThen((buffer: Buffer) => {
-        buffer :> .toString("base64")
-          :> Result.mapErr(Xrpc.JavaScriptFailure)
-          :> Task.fromResult
-          :> Task.andThen((base64) => {
-            if (decodePixels && Cap.renderer != Cap.KittyRenderer) {
-              PngJsr.decode(buffer)
-                :> Task.mapErr(Xrpc.JavaScriptFailure)
-                :> Task.map((pixels) => {
-                  Image(base64, alt, pixels.width, pixels.height, Some(pixels))
-                })
-            } else {
-              Result|buffer :> .readUInt32BE(16), buffer :> .readUInt32BE(20)|
+  fetch(pngUrl(url)) :> Task.mapErr(Xrpc.JavaScriptFailure) :> Task.andThen((response) => {
+    Result|response.ok, response.status| :> Result.mapErr(Xrpc.JavaScriptFailure)
+      :> Task.fromResult :> Task.andThen((ok, status) => {
+        if (!ok) {
+          response :> .text() :> Task.mapErr(Xrpc.JavaScriptFailure)
+            :> Task.andThen((body) => { Task.fail(Xrpc.HttpFailure(status, body)) })
+        } else {
+          response :> .bytes() :> Task.mapErr(Xrpc.JavaScriptFailure)
+            :> Task.andThen((bytes) => {
+              Buffer.copyBytesFrom(bytes)
                 :> Result.mapErr(Xrpc.JavaScriptFailure)
-                :> Task.fromResult
-                :> Task.map((width, height) => {
-                  Image(base64, alt, width, height, None)
+                :> Task.fromResult :> Task.andThen((buffer) => {
+                  buffer :> .toString("base64") :> Result.mapErr(Xrpc.JavaScriptFailure)
+                    :> Task.fromResult :> Task.andThen((base64) => {
+                      if (decodePixels && Cap.renderer != Cap.KittyRenderer) {
+                        PngJsr.decode(buffer) :> Task.mapErr(Xrpc.JavaScriptFailure)
+                          :> Task.map((pixels) => {
+                            Image(base64, alt, pixels.width, pixels.height, Some(pixels))
+                          })
+                      } else {
+                        Result|buffer :> .readUInt32BE(16), buffer :> .readUInt32BE(20)|
+                          :> Result.mapErr(Xrpc.JavaScriptFailure) :> Task.fromResult
+                          :> Task.map((width, height) => { Image(base64, alt, width, height, None) })
+                      }
+                    })
                 })
-            }
-          })
+            })
+        }
       })
-  };
-
-  fetch(pngUrl(url))
-    :> Task.mapErr(Xrpc.JavaScriptFailure)
-    :> inspectStatus
-    :> requireOk
-    :> readBytes
-    :> decodePng
+  })
 };
 
 let loadPng = (url, alt) => { loadPngWithPixels(url, alt, true) };
